@@ -74,26 +74,30 @@ def select_topics(
     return (priority + rest)[:limit]
 
 
-def build_stages(args: argparse.Namespace) -> list[Stage]:
+def build_decompose_stage(args: argparse.Namespace) -> Stage | None:
+    # 1. Decompose the program into a topic list, if asked and not already done.
+    if not args.program:
+        return None
+    topics_file = args.topics_file
+    return Stage(
+        name="mysyllabus decompose",
+        argv=[
+            "mysyllabus", "decompose", "--program", str(args.program),
+            "--engine", args.engine, "--out", str(topics_file),
+            "--max-topics", str(args.max_topics),
+        ],
+        skip=None if not topics_file.exists() else "topic list already exists",
+    )
+
+
+def build_study_stages(args: argparse.Namespace) -> list[Stage]:
     topics_file = args.topics_file
     stages: list[Stage] = []
 
-    # 1. Decompose the program into a topic list, if asked and not already done.
-    if args.program:
-        program_args = ["--program", str(args.program)]
-        stages.append(
-            Stage(
-                name="mysyllabus decompose",
-                argv=[
-                    "mysyllabus", "decompose", *program_args,
-                    "--engine", args.engine, "--out", str(topics_file),
-                    "--max-topics", str(args.max_topics),
-                ],
-                skip=None if not topics_file.exists() else "topic list already exists",
-            )
-        )
-
-    # 2. Select the topics to study this pass.
+    # 2. Select the topics to study this pass. Only meaningful once the
+    # decompose stage above has actually run — the caller runs it (its own
+    # run_cycle call) before calling this, so a fresh course's first --execute
+    # pass sees the topics it just decomposed instead of an always-empty list.
     topics = load_topics(topics_file)
     selected = select_topics(topics, args.ledger, limit=args.topics_per_cycle)
 
@@ -174,8 +178,16 @@ def main(argv: list[str] | None = None) -> int:
     args.ledger = args.ledger or mythings_dir / "mastery.jsonl"
     args.deck_dir = args.deck_dir or mythings_dir / "decks"
 
-    stages = build_stages(args)
-    rc = run_cycle(stages, execute=args.execute, cwd=workdir)
+    # The decompose stage runs to completion first, in its own run_cycle call,
+    # so a fresh course's first pass can select from the topics it just wrote
+    # instead of the empty list that would otherwise still be on disk.
+    rc = 0
+    decompose_stage = build_decompose_stage(args)
+    if decompose_stage is not None:
+        rc = run_cycle([decompose_stage], execute=args.execute, cwd=workdir)
+
+    stages = build_study_stages(args)
+    rc = run_cycle(stages, execute=args.execute, cwd=workdir) or rc
 
     if not args.execute:
         print("\n(dry run — pass --execute to run the decompose/build/quiz steps for real)")
