@@ -151,6 +151,48 @@ exam questions all roll into a single per-topic mastery picture.
 
 ---
 
+## 6. Several exams in parallel
+
+Courses are already isolated from each other: every course's topics, decks,
+and mastery ledger live under its own `--workdir`, so two exams never
+collide. `study_all.py` adds the orchestration on top — a registered list of
+courses and one combined "what's most urgent, across all of them" report.
+
+Declare your active courses in a small TOML registry:
+
+```toml
+# ~/study/courses.toml
+[[course]]
+name = "unsupervised-learning"
+workdir = "~/study/ul"
+corpus = ["~/study/ul/notes.pdf", "~/study/ul/slides.pdf"]
+program = "~/study/ul/syllabus.pdf"   # optional
+exam_date = "2026-07-28"              # optional, YYYY-MM-DD — sharpens ranking
+
+[[course]]
+name = "algorithms"
+workdir = "~/study/algo"
+corpus = ["~/study/algo/notes.pdf"]
+exam_date = "2026-08-04"
+```
+
+Then run one pass across every course:
+
+```bash
+python3 -m myfleet.study_all --courses ~/study/courses.toml \
+  --engine claude --execute --topics-per-cycle 3
+```
+
+This runs a normal `study_cycle` pass per course (same dry-run/`--execute`
+gating, same per-topic billing), then prints a combined standing ranked
+weakest-first — but a course whose `exam_date` is close scales that course's
+scores down, so its weak topics surface ahead of an equally-weak topic in a
+course that's weeks out. Drop `--execute` to see the plan without billing
+anything; `--horizon-days` controls how far out an exam date still sharpens
+the ranking (default 30).
+
+---
+
 ## Gotchas
 
 - **`--engine noop` is the default and does nothing useful** — always pass
