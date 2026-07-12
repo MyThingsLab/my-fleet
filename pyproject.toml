@@ -1,0 +1,56 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "my-fleet"
+version = "0.0.1"
+description = "Fleet orchestration/ops tooling for the MyThingsLab tool fleet — dispatch loop, build/study cycle chaining, cross-repo test gate, ASK-channel merge routing, usage/account monitoring."
+authors = [{ name = "Lorenzo Liuzzo", email = "lorenzoliuzzo@outlook.com" }]
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+dependencies = [
+    "my-things-core",
+    "my-orchestrator",
+    "my-guard",
+    "my-telegram-bot",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-cov>=5", "ruff>=0.6", "pre-commit>=3"]
+
+[project.scripts]
+fleet-dispatch = "myfleet.fleet_dispatch:main"
+fleet-cycle = "myfleet.fleet_cycle:main"
+fleet-test = "myfleet.fleet_test:main"
+merge-ready-prs = "myfleet.merge_ready_prs:main"
+merge-order-prs = "myfleet.merge_order_prs:main"
+account-usage = "myfleet.account_usage:main"
+notify-usage = "myfleet.notify_usage:main"
+notify-systemd-status = "myfleet.notify_systemd_status:main"
+study-cycle = "myfleet.study_cycle:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/myfleet"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+# E501 (line-too-long) is off: these scripts predate this repo's own pyproject
+# (moved here from the old fleet-dispatch root, which had no ruff config at
+# all) and carry many pre-existing lines past 100 cols. Enforcing it now would
+# mean reflowing working, unrelated code as a side effect of the move rather
+# than a real cleanup pass.
+ignore = ["E501"]
+
+[tool.coverage.report]
+fail_under = 85
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = ["slow: integration/slow tests, excluded from the fast local loop"]
