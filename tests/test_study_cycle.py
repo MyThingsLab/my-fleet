@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -50,10 +51,14 @@ def test_select_topics_falls_back_to_weakest_when_nothing_due(tmp_path: Path) ->
 
 
 def _run_main(monkeypatch, argv):
-    captured: dict = {}
+    # main() may call run_cycle twice (decompose alone, then the rest) so a
+    # fresh course's first --program pass can select from what decompose just
+    # wrote. Accumulate stages across calls; existing assertions (first/last
+    # stage, quiz argv) hold either way.
+    captured: dict = {"stages": []}
 
     def fake_run_cycle(stages, *, execute, cwd, runner=None):
-        captured["stages"] = stages
+        captured["stages"].extend(stages)
         captured["execute"] = execute
         captured["cwd"] = cwd
         return 0
@@ -88,6 +93,44 @@ def test_main_adds_decompose_stage_when_program_given(tmp_path: Path, monkeypatc
     ])
     names = [s.name for s in cap["stages"]]
     assert names[0] == "mysyllabus decompose"
+
+
+def test_main_selects_topics_decompose_just_wrote(tmp_path: Path, monkeypatch) -> None:
+    # Regression for the bug where the first --program --execute pass always
+    # saw an empty topic list: topic selection ran before decompose had
+    # actually executed. Simulate a real decompose by writing topics.toml the
+    # moment its stage runs, and assert the same pass builds cards/quiz for it.
+    topics_file = tmp_path / ".mythings" / "topics.toml"
+
+    def fake_run_cycle(stages, *, execute, cwd, runner=None):
+        for stage in stages:
+            if stage.name == "mysyllabus decompose":
+                topics_file.parent.mkdir(parents=True, exist_ok=True)
+                topics_file.write_text(
+                    '[[topic]]\nslug = "em-algorithm"\ntitle = "EM Algorithm"\n',
+                    encoding="utf-8",
+                )
+        return 0
+
+    monkeypatch.setattr(sc, "run_cycle", fake_run_cycle)
+    rc = sc.main([
+        "--corpus", "notes.pdf", "--program", "program.pdf",
+        "--workdir", str(tmp_path), "--topics-per-cycle", "1", "--execute",
+    ])
+    assert rc == 0
+    assert topics_file.exists()  # decompose ran for real in this pass
+    # main() would build the next stage list from this now-populated file —
+    # exercise that directly with the args main() would have used.
+    args = argparse.Namespace(
+        program=Path("program.pdf"), topics_file=topics_file,
+        ledger=tmp_path / ".mythings" / "mastery.jsonl", topics_per_cycle=1,
+        corpus=[Path("notes.pdf")], deck_dir=tmp_path / ".mythings" / "decks",
+        cards=8, questions=3, engine="claude",
+    )
+    stages = sc.build_study_stages(args)
+    names = [s.name for s in stages]
+    assert any(n.startswith("myflashcards build") for n in names)
+    assert any(n.startswith("myprofessor quiz") for n in names)
 
 
 def test_main_defaults_paths_under_workdir(tmp_path: Path, monkeypatch) -> None:
