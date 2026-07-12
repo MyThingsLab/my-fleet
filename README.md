@@ -156,6 +156,30 @@ the fleet root as `my-fleet/`.
 pip install -e ".[dev]"
 ```
 
+## Deploy: the bookkeeping timer
+
+Every fleet instrument (`TODO.md`, the docs site, the dashboard, the resume
+handoff brief) is refresh-on-run — nothing keeps them current while the
+dispatch loop is idle. `systemd/fleet-bookkeeping.{service,timer}` run
+`fleet_cycle.py --execute --skip-dispatch --brief-count 0 --engine noop`
+daily: every step except dispatch and research briefs (planner, tester,
+projector, reporter, docs sync, dashboard render) executes for free, with no
+billed Engine calls and no worker sessions spawned. Switch `--engine` to
+`claude-cli` once a run has confirmed the noop path end to end.
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp systemd/fleet-bookkeeping.{service,timer} ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now fleet-bookkeeping.timer
+```
+
+The unit files assume the fleet root is checked out at
+`~/Desktop/MyThingsLab`; edit the paths in `fleet-bookkeeping.service` first
+if yours differs. `FLEET_ACCOUNTS` in the service file is unused by this cycle
+(dispatch is skipped) but still required by `fleet_cycle.py`'s CLI — leave the
+default unless `--accounts` parsing itself needs a real path.
+
 ## License
 
 MIT.

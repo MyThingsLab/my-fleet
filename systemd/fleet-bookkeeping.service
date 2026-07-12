@@ -1,0 +1,8 @@
+[Unit]
+Description=MyThingsLab fleet bookkeeping cycle (no dispatch, no billed workers)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Desktop/MyThingsLab/my-fleet
+Environment=FLEET_ACCOUNTS=%h/.claude-personal,%h/.claude-work
+ExecStart=%h/Desktop/MyThingsLab/.venv/bin/python3 -m myfleet.fleet_cycle --accounts ${FLEET_ACCOUNTS} --execute --skip-dispatch --brief-count 0 --engine noop

@@ -1,0 +1,9 @@
+[Unit]
+Description=Run the MyThingsLab fleet bookkeeping cycle daily
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target
