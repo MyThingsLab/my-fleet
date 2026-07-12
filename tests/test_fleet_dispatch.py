@@ -1014,6 +1014,14 @@ def test_main_execute_proceeds_with_allow_personal_token(tmp_path: Path, monkeyp
     monkeypatch.delenv("GH_TOKEN", raising=False)
     monkeypatch.setattr(fd, "HALT_MARKER", tmp_path / "HALT")
     monkeypatch.setattr(fd, "DISPATCH_LEDGER", tmp_path / "ledger.jsonl")
+    real_run = fd.subprocess.run
+
+    def fake_run(argv, *args, **kwargs):
+        if argv[:3] == ["gh", "api", "user"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="someone\n", stderr="")
+        return real_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(fd.subprocess, "run", fake_run)
     calls: list = []
     monkeypatch.setattr(fd, "_dispatch_one", _dispatch_stub(calls))
     _wire_single_candidate_orchestrator(monkeypatch)
@@ -1024,12 +1032,40 @@ def test_main_execute_proceeds_with_allow_personal_token(tmp_path: Path, monkeyp
     assert len(calls) == 1
 
 
+def test_main_execute_refuses_personal_token_when_gh_not_authenticated(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.setattr(fd, "HALT_MARKER", tmp_path / "HALT")
+    real_run = fd.subprocess.run
+
+    def fake_run(argv, *args, **kwargs):
+        if argv[:3] == ["gh", "api", "user"]:
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="not authenticated")
+        return real_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(fd.subprocess, "run", fake_run)
+
+    def boom_orchestrator(**_kwargs):
+        raise AssertionError("must refuse before ranking anything")
+
+    monkeypatch.setattr(fd, "Orchestrator", boom_orchestrator)
+
+    rc = fd.main(
+        ["--accounts", str(tmp_path / "a"), "--execute", "--allow-personal-token"]
+    )
+
+    assert rc == 1
+    assert "gh auth status" in capsys.readouterr().out
+
+
 def test_main_execute_proceeds_with_app_identity(tmp_path: Path, monkeypatch) -> None:
     # The App IS the sanctioned identity: no extra opt-in needed.
     monkeypatch.delenv("GH_TOKEN", raising=False)
     monkeypatch.setattr(fd, "HALT_MARKER", tmp_path / "HALT")
     monkeypatch.setattr(fd, "DISPATCH_LEDGER", tmp_path / "ledger.jsonl")
     monkeypatch.setattr(fd, "github_app_token", lambda *a: "ghs_" + "x" * 36)
+    monkeypatch.setattr(fd, "app_installation_org", lambda *a: "MyThingsLab")
     calls: list = []
     monkeypatch.setattr(fd, "_dispatch_one", _dispatch_stub(calls))
     _wire_single_candidate_orchestrator(monkeypatch)
@@ -1046,6 +1082,39 @@ def test_main_execute_proceeds_with_app_identity(tmp_path: Path, monkeypatch) ->
 
     assert rc == 0
     assert len(calls) == 1
+
+
+def test_main_execute_refuses_app_installation_for_wrong_org(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.setattr(fd, "HALT_MARKER", tmp_path / "HALT")
+    monkeypatch.setattr(fd, "app_installation_org", lambda *a: "SomeoneElsesOrg")
+
+    def boom_token(*_a):
+        raise AssertionError("must refuse before minting a token")
+
+    monkeypatch.setattr(fd, "github_app_token", boom_token)
+
+    def boom_orchestrator(**_kwargs):
+        raise AssertionError("must refuse before ranking anything")
+
+    monkeypatch.setattr(fd, "Orchestrator", boom_orchestrator)
+
+    rc = fd.main(
+        [
+            "--accounts", str(tmp_path / "a"),
+            "--execute",
+            "--app-id", "1",
+            "--app-installation-id", "2",
+            "--app-private-key", "/k.pem",
+        ]
+    )
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "SomeoneElsesOrg" in out
+    assert "MyThingsLab" in out
 
 
 def test_main_dry_run_needs_no_identity_optin(tmp_path: Path, monkeypatch) -> None:
@@ -1254,6 +1323,7 @@ def test_main_mints_app_token_and_sets_gh_token_env(tmp_path: Path, monkeypatch,
         return "ghs_minted_token"
 
     monkeypatch.setattr(fd, "github_app_token", fake_token)
+    monkeypatch.setattr(fd, "app_installation_org", lambda *a: "MyThingsLab")
     monkeypatch.setattr(fd, "_dispatch_one", lambda *a, **k: None)
     _wire_single_candidate_orchestrator(monkeypatch)
 
