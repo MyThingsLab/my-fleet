@@ -10,12 +10,12 @@ authors = [{ name = "Lorenzo Liuzzo", email = "lorenzoliuzzo@outlook.com" }]
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
-dependencies = [
-    "my-things-core",
-    "my-orchestrator",
-    "my-guard",
-    "my-telegram-bot",
-]
+# my-things-core, my-orchestrator, my-guard, my-telegram-bot are sibling repos,
+# not on PyPI, and "my-telegram-bot" collides with an unrelated real PyPI
+# package of the same name. Do not list them here — they must be installed
+# explicitly (git+https in CI, editable in the shared local venv), never
+# resolved by pip from this dependency list.
+dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-cov>=5", "ruff>=0.6", "pre-commit>=3"]
