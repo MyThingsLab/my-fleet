@@ -72,6 +72,13 @@ TRANSCRIPTS_DIR = WORKSPACE_ROOT / ".fleet-dispatch" / "transcripts"
 # --max-budget-usd/--max-turns and end on their own); it stops the *next* one.
 HALT_MARKER = WORKSPACE_ROOT / ".fleet-dispatch" / "HALT"
 
+# The spend alert's "Raise cap" button (mytelegrambot's spend_command) shells
+# back into `--raise-daily-cap AMOUNT`; this is where that lands. Day-scoped
+# like the spend it overrides, so a raise from a busy day doesn't silently
+# persist into the next one -- an operator who wants a permanently higher
+# ceiling should pass --max-daily-usd instead.
+DAILY_CAP_OVERRIDE = WORKSPACE_ROOT / ".fleet-dispatch" / "daily-cap-override.json"
+
 # Guards the read-modify-write of allowed_tools.json and its commit in
 # WORKSPACE_ROOT: concurrent dispatches now run in parallel threads, and two
 # threads self-widening the allowlist at once would race on the file and on
@@ -173,6 +180,35 @@ def _today_spend_usd(ledger: Ledger, *, today: str | None = None) -> float:
         float(e.data.get("cost_usd", 0.0))
         for e in ledger.read(tool="fleet_dispatch", kind="usage")
         if e.ts.startswith(day)
+    )
+
+
+def _effective_daily_cap(default_cap: float, *, today: str | None = None) -> float:
+    # Reads the override --raise-daily-cap writes. Missing, unparsable, or
+    # scoped to a different UTC day all fall back to the configured default --
+    # the override is meant to widen today's ceiling, never to persist past it.
+    if not DAILY_CAP_OVERRIDE.exists():
+        return default_cap
+    try:
+        data = json.loads(DAILY_CAP_OVERRIDE.read_text())
+    except (json.JSONDecodeError, OSError):
+        return default_cap
+    day = today or datetime.now(UTC).strftime("%Y-%m-%d")
+    if data.get("day") != day:
+        return default_cap
+    return max(default_cap, float(data.get("cap_usd", default_cap)))
+
+
+def _spend_alert_sent_today(ledger: Ledger, *, today: str | None = None) -> bool:
+    # One push per day is the point: --loop re-evaluates the cap every
+    # iteration, and a threshold crossed once stays crossed for the rest of
+    # the day -- re-alerting every iteration would just be spam the operator
+    # learns to ignore. A push that failed to reach Telegram doesn't count as
+    # sent, so the next iteration retries it.
+    day = today or datetime.now(UTC).strftime("%Y-%m-%d")
+    return any(
+        e.ts.startswith(day) and e.outcome == "success"
+        for e in ledger.read(tool="fleet_dispatch", kind="spend_alert")
     )
 
 
@@ -1060,6 +1096,16 @@ def main(argv: list[str] | None = None) -> int:
         help="remove the HALT marker and exit immediately, restoring normal "
         "--execute operation.",
     )
+    halt_group.add_argument(
+        "--raise-daily-cap",
+        type=float,
+        default=None,
+        metavar="AMOUNT",
+        help="raise today's effective --max-daily-usd ceiling to AMOUNT and "
+        "exit immediately (no --accounts needed); the CLI hand-off the spend "
+        "alert's Raise-cap button in Telegram shells back into. UTC-day-scoped "
+        "-- reverts to --max-daily-usd on its own the next day.",
+    )
     parser.add_argument(
         "--ask-human",
         action="store_true",
@@ -1108,6 +1154,17 @@ def main(argv: list[str] | None = None) -> int:
         help="hard ceiling on total fleet_dispatch spend (all accounts, kind=usage "
         "ledger entries) per UTC calendar day; a run that would push projected "
         "spend over this refuses to launch anything, before spend (default: $20)",
+    )
+    parser.add_argument(
+        "--spend-alert-fraction",
+        type=float,
+        default=0.8,
+        help="push a Telegram spend alert (with Halt / Raise-cap buttons) the "
+        "first time projected spend crosses this fraction of the effective "
+        "daily cap, so the operator finds out while the fleet is still "
+        "spending rather than after the cap trips or in tomorrow's digest. "
+        "One push per UTC day; best-effort -- a failed push never blocks a "
+        "run (default: 0.8)",
     )
     parser.add_argument(
         "--ready-timeout",
@@ -1164,6 +1221,18 @@ def main(argv: list[str] | None = None) -> int:
             print(f"HALT marker cleared: {HALT_MARKER}")
         else:
             print("no HALT marker was set")
+        return 0
+
+    if args.raise_daily_cap is not None:
+        DAILY_CAP_OVERRIDE.parent.mkdir(parents=True, exist_ok=True)
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        DAILY_CAP_OVERRIDE.write_text(
+            json.dumps({"day": today, "cap_usd": args.raise_daily_cap})
+        )
+        print(
+            f"today's effective daily cap raised to ${args.raise_daily_cap:.2f} "
+            f"(--max-daily-usd default: ${args.max_daily_usd:.2f})"
+        )
         return 0
 
     if args.ask_human:
@@ -1354,17 +1423,25 @@ def main(argv: list[str] | None = None) -> int:
             # Record it once, so it stays skipped instead of being re-evaluated
             # (and re-counted) every run.
             if prior.outcome != "needs_human":
+                detail = (
+                    f"{c.id}: gave up after {prior.attempt_number} attempts "
+                    f"(last outcome: {prior.outcome})"
+                )
                 dispatch_ledger.record(
                     tool="fleet_dispatch",
                     kind="dispatch",
                     outcome="needs_human",
-                    detail=f"{c.id}: gave up after {prior.attempt_number} attempts "
-                    f"(last outcome: {prior.outcome})",
+                    detail=detail,
                     candidate=c.id,
                     account="-",
                     branch=_branch_name(c),
                     attempt=prior.attempt_number,
                     final_message=prior.final_message[:500],
+                )
+                # Best-effort: needs_human is recorded either way, so a dead
+                # channel loses the phone ping, not the escalation itself.
+                fleet_ask.escalate_blocker(
+                    candidate=c.id, detail=detail, attempt=prior.attempt_number
                 )
             continue
         plan.append((c, prior if decision == "resume" else None))
@@ -1376,18 +1453,37 @@ def main(argv: list[str] | None = None) -> int:
     # refuse the whole run if that would cross the daily ceiling. A dry run
     # spends nothing, so it's exempt.
     if args.execute and pairs:
+        effective_cap = _effective_daily_cap(args.max_daily_usd)
         spent_today = _today_spend_usd(dispatch_ledger)
         projected = spent_today + len(pairs) * args.max_budget_usd
-        if projected > args.max_daily_usd:
+        if projected > effective_cap:
             print(
                 f"refusing to launch: today's fleet_dispatch spend is already "
                 f"${spent_today:.2f}, and {len(pairs)} more session(s) at up to "
                 f"${args.max_budget_usd:.2f} each could reach ${projected:.2f}, "
-                f"over the ${args.max_daily_usd:.2f}/day cap (--max-daily-usd). "
-                f"Raise --max-daily-usd, lower --max-budget-usd, or wait for the "
-                f"UTC day to roll over."
+                f"over the ${effective_cap:.2f}/day cap (--max-daily-usd, "
+                f"or a --raise-daily-cap override). Raise --max-daily-usd, lower "
+                f"--max-budget-usd, or wait for the UTC day to roll over."
             )
             return 1
+        # A supervised loop should learn it's approaching the cap while it is
+        # still spending, not from tomorrow's digest or when the refusal above
+        # finally trips -- see fleet-dispatch#41. Once per day is deliberate:
+        # --loop re-evaluates this every iteration, and a crossed threshold
+        # stays crossed.
+        if (
+            projected >= args.spend_alert_fraction * effective_cap
+            and not _spend_alert_sent_today(dispatch_ledger)
+        ):
+            raise_to = round(effective_cap * 1.5, 2)
+            sent = fleet_ask.alert_spend(spent=spent_today, cap=effective_cap, raise_to=raise_to)
+            dispatch_ledger.record(
+                tool="fleet_dispatch",
+                kind="spend_alert",
+                outcome="success" if sent else "failure",
+                detail=f"spend alert: ${spent_today:.2f}/${effective_cap:.2f} "
+                f"({args.spend_alert_fraction:.0%} threshold)",
+            )
 
     failures: list[tuple[Account, Candidate, BaseException]] = []
     if pairs:

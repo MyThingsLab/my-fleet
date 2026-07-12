@@ -951,6 +951,211 @@ def test_main_dry_run_ignores_daily_cap(tmp_path: Path, monkeypatch) -> None:
     assert rc == 0
 
 
+def _gh_identity_stub(login: str = "someone"):
+    real_run = fd.subprocess.run
+
+    def fake_run(argv, *args, **kwargs):
+        if argv[:3] == ["gh", "api", "user"]:
+            return subprocess.CompletedProcess(argv, 0, stdout=f"{login}\n", stderr="")
+        return real_run(argv, *args, **kwargs)
+
+    return fake_run
+
+
+def test_effective_daily_cap_without_override_returns_default(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(fd, "DAILY_CAP_OVERRIDE", tmp_path / "override.json")
+
+    assert fd._effective_daily_cap(20.0) == 20.0
+
+
+def test_effective_daily_cap_uses_override_for_today(tmp_path: Path, monkeypatch) -> None:
+    override = tmp_path / "override.json"
+    override.write_text(json.dumps({"day": "2026-07-12", "cap_usd": 40.0}))
+    monkeypatch.setattr(fd, "DAILY_CAP_OVERRIDE", override)
+
+    assert fd._effective_daily_cap(20.0, today="2026-07-12") == 40.0
+
+
+def test_effective_daily_cap_ignores_override_from_a_different_day(
+    tmp_path: Path, monkeypatch
+) -> None:
+    override = tmp_path / "override.json"
+    override.write_text(json.dumps({"day": "2026-07-11", "cap_usd": 40.0}))
+    monkeypatch.setattr(fd, "DAILY_CAP_OVERRIDE", override)
+
+    assert fd._effective_daily_cap(20.0, today="2026-07-12") == 20.0
+
+
+def test_effective_daily_cap_never_lowers_below_default(tmp_path: Path, monkeypatch) -> None:
+    # A raise is meant to widen, never narrow -- a stale low override from
+    # earlier in the day must not undercut a --max-daily-usd bump.
+    override = tmp_path / "override.json"
+    override.write_text(json.dumps({"day": "2026-07-12", "cap_usd": 5.0}))
+    monkeypatch.setattr(fd, "DAILY_CAP_OVERRIDE", override)
+
+    assert fd._effective_daily_cap(20.0, today="2026-07-12") == 20.0
+
+
+def test_spend_alert_sent_today_true_only_for_successful_same_day_entry(
+    tmp_path: Path,
+) -> None:
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    ledger.append(
+        LedgerEntry(
+            tool="fleet_dispatch", kind="spend_alert", outcome="failure", ts="2026-07-12T01:00:00Z"
+        )
+    )
+    assert fd._spend_alert_sent_today(ledger, today="2026-07-12") is False
+
+    ledger.append(
+        LedgerEntry(
+            tool="fleet_dispatch", kind="spend_alert", outcome="success", ts="2026-07-11T01:00:00Z"
+        )
+    )
+    assert fd._spend_alert_sent_today(ledger, today="2026-07-12") is False
+
+    ledger.append(
+        LedgerEntry(
+            tool="fleet_dispatch", kind="spend_alert", outcome="success", ts="2026-07-12T02:00:00Z"
+        )
+    )
+    assert fd._spend_alert_sent_today(ledger, today="2026-07-12") is True
+
+
+def test_main_raise_daily_cap_writes_override_and_exits(tmp_path: Path, monkeypatch) -> None:
+    override = tmp_path / "override.json"
+    monkeypatch.setattr(fd, "DAILY_CAP_OVERRIDE", override)
+
+    def boom_orchestrator(**_kwargs):
+        raise AssertionError("--raise-daily-cap must exit before touching the orchestrator")
+
+    monkeypatch.setattr(fd, "Orchestrator", boom_orchestrator)
+
+    rc = fd.main(["--raise-daily-cap", "35.0"])
+
+    assert rc == 0
+    data = json.loads(override.read_text())
+    assert data["cap_usd"] == 35.0
+    assert data["day"] == datetime.now(fd.UTC).strftime("%Y-%m-%d")
+
+
+def test_main_pushes_spend_alert_once_when_threshold_crossed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    dispatch_ledger_path = tmp_path / "ledger.jsonl"
+    monkeypatch.setattr(fd, "DISPATCH_LEDGER", dispatch_ledger_path)
+    ledger = Ledger(dispatch_ledger_path)
+    today = datetime.now(fd.UTC).strftime("%Y-%m-%d")
+    _usage_entry(ledger, cost_usd=17.0, ts=f"{today}T00:00:00Z")  # 85% of a $20 cap
+
+    monkeypatch.setattr(fd.subprocess, "run", _gh_identity_stub())
+    calls: list = []
+    monkeypatch.setattr(fd, "_dispatch_one", _dispatch_stub(calls))
+    alert_calls: list = []
+    monkeypatch.setattr(
+        fd.fleet_ask,
+        "alert_spend",
+        lambda **kw: alert_calls.append(kw) or True,
+    )
+    _wire_single_candidate_orchestrator(monkeypatch)
+
+    rc = fd.main(
+        [
+            "--accounts", str(tmp_path / "a"),
+            "--execute", "--allow-personal-token",
+            "--max-budget-usd", "1.0",
+            "--max-daily-usd", "20.0",
+        ]
+    )
+
+    assert rc == 0
+    assert len(alert_calls) == 1
+    assert alert_calls[0]["spent"] == pytest.approx(17.0)
+    assert alert_calls[0]["cap"] == pytest.approx(20.0)
+
+    entries = ledger.read(tool="fleet_dispatch", kind="spend_alert")
+    assert len(entries) == 1
+    assert entries[0].outcome == "success"
+
+
+def test_main_does_not_repush_spend_alert_same_day(tmp_path: Path, monkeypatch) -> None:
+    dispatch_ledger_path = tmp_path / "ledger.jsonl"
+    monkeypatch.setattr(fd, "DISPATCH_LEDGER", dispatch_ledger_path)
+    ledger = Ledger(dispatch_ledger_path)
+    today = datetime.now(fd.UTC).strftime("%Y-%m-%d")
+    _usage_entry(ledger, cost_usd=17.0, ts=f"{today}T00:00:00Z")
+    ledger.record(tool="fleet_dispatch", kind="spend_alert", outcome="success", detail="already sent")
+
+    monkeypatch.setattr(fd.subprocess, "run", _gh_identity_stub())
+    monkeypatch.setattr(fd, "_dispatch_one", _dispatch_stub([]))
+    alert_calls: list = []
+    monkeypatch.setattr(
+        fd.fleet_ask, "alert_spend", lambda **kw: alert_calls.append(kw) or True
+    )
+    _wire_single_candidate_orchestrator(monkeypatch)
+
+    rc = fd.main(
+        [
+            "--accounts", str(tmp_path / "a"),
+            "--execute", "--allow-personal-token",
+            "--max-budget-usd", "1.0",
+            "--max-daily-usd", "20.0",
+        ]
+    )
+
+    assert rc == 0
+    assert alert_calls == []
+
+
+def test_main_escalates_blocker_on_needs_human(tmp_path: Path, monkeypatch) -> None:
+    dispatch_ledger_path = tmp_path / "ledger.jsonl"
+    monkeypatch.setattr(fd, "DISPATCH_LEDGER", dispatch_ledger_path)
+
+    candidate = fd.Candidate(
+        id="repo#1", repo="repo", tool="", title="t1", kind="issue", created_at="2020-01-01"
+    )
+
+    class FakeRecommendation:
+        def __init__(self, chosen: fd.Candidate) -> None:
+            self.chosen = chosen
+
+    class FakeOrchestrator:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def next_n(self, _n: int) -> list[FakeRecommendation]:
+            return [FakeRecommendation(candidate)]
+
+    monkeypatch.setattr(fd, "Orchestrator", FakeOrchestrator)
+    monkeypatch.setattr(fd, "_preflight_distinct_accounts", lambda accounts: [])
+    monkeypatch.setattr(fd, "_open_pr_number", lambda *a, **k: None)
+    stuck = fd.Attempt(
+        candidate_id="repo#1",
+        outcome="failed",
+        branch="fleet-dispatch/repo-1",
+        attempt_number=fd.MAX_ATTEMPTS,
+        blocker=None,
+        final_message="nope",
+    )
+    monkeypatch.setattr(fd, "_last_attempt", lambda *a, **k: stuck)
+
+    escalate_calls: list = []
+    monkeypatch.setattr(
+        fd.fleet_ask,
+        "escalate_blocker",
+        lambda **kw: escalate_calls.append(kw) or True,
+    )
+
+    rc = fd.main(["--accounts", str(tmp_path / "a")])
+
+    assert rc == 0
+    assert len(escalate_calls) == 1
+    assert escalate_calls[0]["candidate"] == "repo#1"
+    assert escalate_calls[0]["attempt"] == fd.MAX_ATTEMPTS
+
+
 def test_dispatch_one_passes_max_turns_and_max_budget_to_claude(tmp_path: Path, monkeypatch) -> None:
     repo_path = tmp_path / "repo"
     repo_path.mkdir()

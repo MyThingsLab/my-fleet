@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -191,3 +192,52 @@ def enable(
     wiring = ask_env(ledger=ledger, timeout=timeout)
     env.update(wiring)
     return wiring
+
+
+# Push-only notifications, the other direction from `ask`: these never block
+# on a reply, so they get none of the daemon/credential preflight above --
+# a failed push here should never take down the run that triggered it. Both
+# are best-effort: swallow any failure to reach `mytelegrambot` (missing
+# binary, dead daemon, Telegram API error) and report it as a bool rather
+# than raising, mirroring the bot's own "a notify failure is non-fatal" rule.
+_NOTIFY_TIMEOUT = 30
+
+
+def alert_spend(
+    *, spent: float, cap: float, raise_to: float, ledger: Path = BOT_LEDGER
+) -> bool:
+    binary = ask_binary() or Path("mytelegrambot")
+    try:
+        proc = subprocess.run(
+            [
+                str(binary), "alert-spend",
+                "--spent", f"{spent:.2f}",
+                "--cap", f"{cap:.2f}",
+                "--raise-to", f"{raise_to:.2f}",
+                "--ledger", str(ledger),
+            ],
+            capture_output=True, text=True, timeout=_NOTIFY_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
+def escalate_blocker(
+    *, candidate: str, detail: str, attempt: int, ledger: Path = BOT_LEDGER
+) -> bool:
+    binary = ask_binary() or Path("mytelegrambot")
+    try:
+        proc = subprocess.run(
+            [
+                str(binary), "escalate-blocker",
+                "--candidate", candidate,
+                "--detail", detail,
+                "--attempt", str(attempt),
+                "--ledger", str(ledger),
+            ],
+            capture_output=True, text=True, timeout=_NOTIFY_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
