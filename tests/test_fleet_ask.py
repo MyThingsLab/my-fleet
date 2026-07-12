@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -245,3 +246,90 @@ def test_the_refusal_never_echoes_the_token(
         fleet_ask.enable(ledger=ledger, env=env)
 
     assert "super-secret-token" not in str(caught.value)
+
+
+# The push-only notifications (fleet-dispatch#41 spend tripwire, #44 blocker
+# escalation), the other direction from `ask`: these never block on a reply,
+# so a failure to reach `mytelegrambot` must degrade to a bool, never raise --
+# the run that triggered the push must survive a dead channel.
+
+
+def test_alert_spend_invokes_the_bot_with_the_right_args(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(fleet_ask, "ask_binary", lambda: Path("/usr/bin/mytelegrambot"))
+    captured = {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(fleet_ask.subprocess, "run", fake_run)
+    ledger = tmp_path / "ledger.jsonl"
+
+    ok = fleet_ask.alert_spend(spent=15.5, cap=20.0, raise_to=30.0, ledger=ledger)
+
+    assert ok is True
+    argv = captured["argv"]
+    assert argv[:2] == ["/usr/bin/mytelegrambot", "alert-spend"]
+    assert argv[argv.index("--spent") + 1] == "15.50"
+    assert argv[argv.index("--cap") + 1] == "20.00"
+    assert argv[argv.index("--raise-to") + 1] == "30.00"
+    assert argv[argv.index("--ledger") + 1] == str(ledger)
+
+
+def test_alert_spend_returns_false_on_a_nonzero_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(fleet_ask, "ask_binary", lambda: Path("/usr/bin/mytelegrambot"))
+    monkeypatch.setattr(
+        fleet_ask.subprocess, "run", lambda argv, **k: subprocess.CompletedProcess(argv, 1)
+    )
+
+    assert fleet_ask.alert_spend(spent=1, cap=2, raise_to=3) is False
+
+
+def test_alert_spend_swallows_a_missing_binary(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(fleet_ask, "ask_binary", lambda: Path("/usr/bin/mytelegrambot"))
+
+    def raise_missing(argv, **kwargs):
+        raise FileNotFoundError("no such file")
+
+    monkeypatch.setattr(fleet_ask.subprocess, "run", raise_missing)
+
+    assert fleet_ask.alert_spend(spent=1, cap=2, raise_to=3) is False
+
+
+def test_escalate_blocker_invokes_the_bot_with_the_right_args(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(fleet_ask, "ask_binary", lambda: Path("/usr/bin/mytelegrambot"))
+    captured = {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(fleet_ask.subprocess, "run", fake_run)
+    ledger = tmp_path / "ledger.jsonl"
+
+    ok = fleet_ask.escalate_blocker(
+        candidate="repo#1", detail="gave up after 3 attempts", attempt=3, ledger=ledger
+    )
+
+    assert ok is True
+    argv = captured["argv"]
+    assert argv[:2] == ["/usr/bin/mytelegrambot", "escalate-blocker"]
+    assert argv[argv.index("--candidate") + 1] == "repo#1"
+    assert argv[argv.index("--detail") + 1] == "gave up after 3 attempts"
+    assert argv[argv.index("--attempt") + 1] == "3"
+    assert argv[argv.index("--ledger") + 1] == str(ledger)
+
+
+def test_escalate_blocker_returns_false_on_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(fleet_ask, "ask_binary", lambda: Path("/usr/bin/mytelegrambot"))
+
+    def raise_timeout(argv, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=30)
+
+    monkeypatch.setattr(fleet_ask.subprocess, "run", raise_timeout)
+
+    assert fleet_ask.escalate_blocker(candidate="repo#1", detail="d", attempt=1) is False
