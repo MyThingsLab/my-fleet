@@ -52,7 +52,7 @@ from myorchestrator.candidates import Candidate
 from myorchestrator.manifest import default_manifest_path
 from myorchestrator.orchestrator import Orchestrator, Recommendation
 from mythings import _secrets
-from mythings.github import github_app_token
+from mythings.github import app_installation_org, github_app_token
 from mythings.isolation import Workspace
 from mythings.ledger import Ledger
 
@@ -1205,6 +1205,20 @@ def main(argv: list[str] | None = None) -> int:
             "--app-id, --app-installation-id, and --app-private-key must be given together"
         )
     if all(app_flags):
+        # A stale or mistyped --app-installation-id would otherwise mint a
+        # perfectly working token silently scoped to the wrong account --
+        # nothing about a successful mint proves it's *this* org's
+        # installation. Check before the token is ever used anywhere.
+        installation_org = app_installation_org(
+            args.app_id, args.app_installation_id, args.app_private_key
+        )
+        if installation_org != args.org:
+            print(
+                f"refusing to dispatch: --app-installation-id {args.app_installation_id} "
+                f"belongs to '{installation_org}', not the target org '{args.org}'. "
+                f"Using it would hand every worker credentials scoped to the wrong account."
+            )
+            return 1
         # Setting it here, once, is enough for every later `gh` call in this
         # process: fleet_dispatch's own bare subprocess.run(["gh", ...]) calls
         # inherit os.environ implicitly, and _dispatch_one's `env = {**os.environ,
@@ -1215,8 +1229,8 @@ def main(argv: list[str] | None = None) -> int:
             args.app_id, args.app_installation_id, args.app_private_key
         )
         print(
-            f"authenticating as the GitHub App (installation {args.app_installation_id}) "
-            f"— the personal PAT is not used for this run"
+            f"authenticating as the GitHub App (installation {args.app_installation_id}, "
+            f"org '{installation_org}') — the personal PAT is not used for this run"
         )
 
     # Identity gate: spawning workers on the ambient personal token hands every
@@ -1232,6 +1246,19 @@ def main(argv: list[str] | None = None) -> int:
             "this run."
         )
         return 1
+
+    if args.execute and not all(app_flags):
+        # --allow-personal-token was accepted above; make the actual identity
+        # visible rather than trusting the flag alone -- a stale GH_TOKEN env
+        # var or a `gh auth switch` since the last run could point somewhere
+        # unexpected, silently.
+        proc = subprocess.run(
+            ["gh", "api", "user", "-q", ".login"], capture_output=True, text=True
+        )
+        if proc.returncode != 0:
+            print(f"refusing to dispatch: `gh auth status` failed — {proc.stderr.strip()}")
+            return 1
+        print(f"using the ambient personal gh token, authenticated as '{proc.stdout.strip()}'")
 
     # A fleet of accounts that are secretly the same account is not a fleet.
     # Always gate on distinct identities -- cheap, local, and it prevents silently
