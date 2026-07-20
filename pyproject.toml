@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "my-fleet"
-version = "0.0.1"
+version = "1.0.0"
 description = "Fleet orchestration/ops tooling for the MyThingsLab tool fleet — dispatch loop, build/study cycle chaining, cross-repo test gate, ASK-channel merge routing, usage/account monitoring."
 authors = [{ name = "Lorenzo Liuzzo", email = "lorenzoliuzzo@outlook.com" }]
 readme = "README.md"
