@@ -40,6 +40,9 @@ jobs:
           # notify_usage.py / notify_systemd_status.py import mytelegrambot.transport;
           # --no-deps for the same pre-rename-metadata reason as my-orchestrator.
           pip install --no-deps "my-telegram-bot @ git+https://github.com/${{ github.repository_owner }}/my-telegram-bot@main"
+          # fleet_cycle imports mypipeline.plan.build_plan to drive the cycle off
+          # my-pipeline's declarative tool-chaining graph.
+          pip install --no-deps "my-pipeline @ git+https://github.com/${{ github.repository_owner }}/my-pipeline@main"
           pip install -e ".[dev]"
       - name: Ruff
         run: ruff check src tests

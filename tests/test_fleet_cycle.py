@@ -132,6 +132,47 @@ def test_main_skips_mydashboard_when_docs_site_clone_missing(
     assert "skipping mydashboard" in capsys.readouterr().out
 
 
+def test_cycle_stage_order_follows_the_graph_plan(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Order is graph-derived now: planner leads, the handoff sync fires before
+    # the final notify. Point WORKSPACE_ROOT at an empty dir so the per-repo
+    # fan-out stages (tester/changelogger) contribute nothing to the trace.
+    calls = _capture_runs(monkeypatch)
+    monkeypatch.setattr(fc, "WORKSPACE_ROOT", tmp_path)
+    (tmp_path / fc.DOCS_SITE_CLONE).mkdir()
+    fc.main(["--accounts", "/tmp/acct", "--skip-dispatch", "--execute", "--brief-count", "0"])
+    tools = [cmd[0] for cmd, _ in calls]
+    assert tools[0] == "myplanner"
+    assert tools[-1] == "mytelegrambot"
+    # mypipeline sync (the ledger->issue handoffs) is wired in before notify.
+    assert tools.index("mypipeline") < tools.index("mytelegrambot")
+
+
+def test_execute_runs_mypipeline_sync_handoff_stage(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls = _capture_runs(monkeypatch)
+    monkeypatch.setattr(fc, "WORKSPACE_ROOT", tmp_path)
+    fc.main(["--accounts", "/tmp/acct", "--skip-dispatch", "--execute", "--brief-count", "0"])
+    sync_cmd, _ = next((cmd, env) for cmd, env in calls if cmd[0] == "mypipeline")
+    assert sync_cmd[1] == "sync"
+    assert sync_cmd[sync_cmd.index("--repo-root") + 1] == str(tmp_path)
+    assert sync_cmd[sync_cmd.index("--org") + 1] == fc.ORG
+
+
+def test_unknown_graph_stage_is_skipped_not_fatal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from mypipeline.plan import PlanItem
+
+    calls = _capture_runs(monkeypatch)
+    monkeypatch.setattr(fc, "build_plan", lambda: [PlanItem("x", "no-such-stage", "none")])
+    fc.main(["--accounts", "/tmp/acct", "--skip-dispatch", "--execute", "--brief-count", "0"])
+    assert calls == []
+    assert "no resolver for graph stage 'no-such-stage'" in capsys.readouterr().out
+
+
 def test_main_forwards_allow_personal_token_to_dispatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
