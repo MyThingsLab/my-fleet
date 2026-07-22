@@ -1,22 +1,17 @@
 #!/usr/bin/env python3
 """Run one full autonomous fleet cycle by chaining every tool's own CLI.
 
-Order mirrors the authority chain each tool's CLAUDE.md already declares:
+The step *order* is no longer hand-coded here: it comes from my-pipeline's
+declarative graph (`mypipeline.plan.build_plan`), the fleet's one source of
+tool-chaining truth. Each graph node names a `stage`; a resolver in this file
+(RESOLVERS below) binds that stage to concrete argv at run time -- my-pipeline
+owns *what runs and in what order*, my-fleet owns *how each stage binds and
+whether we can afford to tick now*. The default graph reproduces the order this
+docstring used to enumerate by hand:
 
-  1. myplanner plan     - refresh the recommended sequence (feeds MyOrchestrator's
-                           ranking via its own plan-ledger; never dispatches).
-  2. fleet_dispatch.py   - MyOrchestrator picks the next unit(s) of work, workers
-                           close them as PRs (existing script, reused as-is).
-  3. myresearcher brief  - brief a bounded number of open `my-researcher` topic
-                           issues in MyThingsLab/study (billed: one Engine call
-                           each, so capped by --brief-count).
-  4. mytester run        - per repo, add coverage for one uncovered unit.
-  5. mychangelogger update - per repo, fold new dev-ledger entries into CHANGELOG.md.
-  6. mydocs sync         - refresh the fleet docs site from each tool's README/CLAUDE.md.
-  7. mydashboard render  - refresh the org-wide fleet dashboard page.
-  8. myprojector sync    - reconcile the org Project board + tracking-issue checklist.
-  9. myreporter post     - post a fleet-wide digest comment on the tracking issue.
- 10. mytelegrambot notify - push everything since the last notify to Telegram.
+  myplanner -> fleet_dispatch -> myresearcher -> mytester -> mychangelogger ->
+  mydocs -> mydashboard -> myprojector -> myreporter -> mypipeline sync
+  (fire ledger handoffs) -> mytelegrambot notify.
 
 No tool calls another tool's CLI directly (each stays a separate `gh`-attributed
 run, per their CLAUDE.md invariants) -- this script is the external driver that
@@ -24,10 +19,10 @@ chains them, the same role fleet_dispatch.py already plays for orchestrator+work
 
 Defaults to a dry run (report only, no mutating subcommands). Pass --execute to
 actually run myresearcher/mytester/mychangelogger/mydocs/mydashboard/myprojector/
-myreporter/mytelegrambot for real; fleet_dispatch's own --execute is passed
-through separately since it spawns billed headless sessions.
+myreporter/mypipeline/mytelegrambot for real; fleet_dispatch's own --execute is
+passed through separately since it spawns billed headless sessions.
 
---loop keeps re-running the 10 steps instead of exiting after one pass, meant for
+--loop keeps re-running the cycle instead of exiting after one pass, meant for
 an always-on host (see the systemd unit alongside this file's PR). Each
 iteration re-derives the usable account pool via account_usage.select_accounts
 (polled on --account-recheck-min, not every iteration -- each poll is a real
@@ -48,13 +43,16 @@ import os
 import subprocess
 import sys
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
+from mypipeline.plan import build_plan
 from mythings.ledger import Ledger
 
 import myfleet.account_usage as account_usage
 import myfleet.fleet_ask as fleet_ask
-from myfleet.cycle_driver import run_command
+from myfleet.cycle_driver import Stage, run_command
 from myfleet.fleet_dispatch import DISPATCH_LEDGER, HALT_MARKER, _critical_halt_issues
 
 # Climbs myfleet/<file>.py -> src -> my-fleet -> MyThingsLab/ (the fleet root).
@@ -152,6 +150,173 @@ def _cycle_halt_reason() -> str | None:
     return None
 
 
+@dataclass(frozen=True)
+class _Ctx:
+    args: argparse.Namespace
+    accounts: str
+    skip_dispatch: bool
+    py: str
+
+
+# One resolver per graph `stage`: binds the stage to zero or more concrete
+# Stages at tick time (fan-out returns many; a missing input returns a skip).
+# `mutating=False` runs even in a dry run (planner/dispatch/tester/projector
+# always run, only their argv changes); `mutating=True` runs only under
+# --execute. This is the runtime binding my-pipeline's graph deliberately does
+# not hold -- accounts, per-repo fan-out, live gh queries, missing-clone guards.
+def _stage_planner(ctx: _Ctx) -> list[Stage]:
+    return [Stage("myplanner", [
+        "myplanner", "plan",
+        "--org", ORG,
+        "--repo-root", str(WORKSPACE_ROOT),
+        "--tracking-repo", TRACKING_REPO,
+        "--tracking-issue", TRACKING_ISSUE,
+        "--engine", ctx.args.engine,
+    ], mutating=False)]
+
+
+def _stage_dispatch(ctx: _Ctx) -> list[Stage]:
+    if ctx.skip_dispatch:
+        return []
+    cmd = [ctx.py, "-m", "myfleet.fleet_dispatch", "--accounts", ctx.accounts]
+    if ctx.args.dispatch_execute:
+        cmd.append("--execute")
+    if ctx.args.allow_personal_token:
+        cmd.append("--allow-personal-token")
+    return [Stage("fleet-dispatch", cmd, mutating=False)]
+
+
+def _stage_researcher(ctx: _Ctx) -> list[Stage]:
+    if ctx.args.brief_count <= 0:
+        return []
+    if not STUDY_ROOT.exists():
+        return [Stage("myresearcher", [], skip=f"no study clone at {STUDY_ROOT}")]
+    candidates = _brief_candidates(ctx.args.brief_count)
+    if candidates is None:
+        return [Stage("myresearcher", [], skip=f"could not query {STUDY_REPO}")]
+    if not candidates:
+        return [Stage(
+            "myresearcher", [], skip=f"no open {RESEARCH_LABEL} issues in {STUDY_REPO} left to brief"
+        )]
+    # ClaudeCLIEngine needs an authenticated CLI; borrow the first fleet
+    # account's CLAUDE_CONFIG_DIR (TAVILY_API_KEY is not set on this host, so
+    # retrieval sticks to keyless arXiv).
+    account = ctx.accounts.split(",")[0].strip()
+    env = {**os.environ, "CLAUDE_CONFIG_DIR": str(Path(account).expanduser())}
+    return [
+        Stage("myresearcher", [
+            "myresearcher", "brief",
+            "--issue", str(number),
+            "--repo", STUDY_REPO,
+            "--repo-root", str(STUDY_ROOT),
+            "--engine", ctx.args.engine,
+            "--sources", "arxiv",
+        ], mutating=True, env=env)
+        for number in candidates
+    ]
+
+
+def _stage_tester(ctx: _Ctx) -> list[Stage]:
+    stages = []
+    for repo in tool_repos(WORKSPACE_ROOT):
+        cmd = ["mytester", "run", "--source", str(WORKSPACE_ROOT / repo), "--engine", ctx.args.engine]
+        if not ctx.args.execute:
+            cmd.append("--local-only")
+        stages.append(Stage("mytester", cmd, mutating=False))
+    return stages
+
+
+def _stage_changelogger(ctx: _Ctx) -> list[Stage]:
+    return [
+        Stage("mychangelogger", ["mychangelogger", "update", "--source", str(WORKSPACE_ROOT / repo)])
+        for repo in tool_repos(WORKSPACE_ROOT)
+    ]
+
+
+def _stage_docs(ctx: _Ctx) -> list[Stage]:
+    docs_site_root = WORKSPACE_ROOT / DOCS_SITE_CLONE
+    if not docs_site_root.is_dir():
+        return [Stage("mydocs", [], skip=f"no local docs-site clone at {docs_site_root}")]
+    return [Stage("mydocs", [
+        "mydocs", "sync", "--all",
+        "--repo-root", str(docs_site_root),
+        "--engine", ctx.args.engine,
+    ])]
+
+
+def _stage_dashboard(ctx: _Ctx) -> list[Stage]:
+    docs_site_root = WORKSPACE_ROOT / DOCS_SITE_CLONE
+    if not docs_site_root.is_dir():
+        return [Stage("mydashboard", [], skip=f"no local docs-site clone at {docs_site_root}")]
+    return [Stage("mydashboard", [
+        "mydashboard", "render",
+        "--repo-root", str(docs_site_root),
+        "--workspace", str(WORKSPACE_ROOT),
+        "--engine", ctx.args.engine,
+    ])]
+
+
+def _stage_projector(ctx: _Ctx) -> list[Stage]:
+    cmd = [
+        "myprojector", "sync",
+        "--org", ORG,
+        "--project-number", PROJECT_NUMBER,
+        "--tracking-repo", TRACKING_REPO,
+        "--tracking-issue", TRACKING_ISSUE,
+        "--engine", ctx.args.engine,
+    ]
+    cmd.append("--apply-checklist" if ctx.args.execute else "--dry-run")
+    return [Stage("myprojector", cmd, mutating=False)]
+
+
+def _stage_reporter(ctx: _Ctx) -> list[Stage]:
+    return [Stage("myreporter", [
+        "myreporter", "post",
+        "--repo", TRACKING_REPO,
+        "--issue", TRACKING_ISSUE,
+        "--repo-root", str(WORKSPACE_ROOT),
+        "--summarize",
+        "--engine", ctx.args.engine,
+    ])]
+
+
+def _stage_handoffs(ctx: _Ctx) -> list[Stage]:
+    # Fire the graph's ledger->issue handoffs (the file-issue nodes) -- the
+    # third chaining axis, now wired into the cycle it used to sit beside.
+    return [Stage("mypipeline-sync", ["mypipeline", "sync", "--repo-root", str(WORKSPACE_ROOT), "--org", ORG])]
+
+
+def _stage_telegram(ctx: _Ctx) -> list[Stage]:
+    return [Stage("mytelegrambot", ["mytelegrambot", "notify"])]
+
+
+RESOLVERS: dict[str, Callable[[_Ctx], list[Stage]]] = {
+    "myplanner": _stage_planner,
+    "fleet-dispatch": _stage_dispatch,
+    "myresearcher": _stage_researcher,
+    "mytester": _stage_tester,
+    "mychangelogger": _stage_changelogger,
+    "mydocs": _stage_docs,
+    "mydashboard": _stage_dashboard,
+    "myprojector": _stage_projector,
+    "myreporter": _stage_reporter,
+    "mypipeline-sync": _stage_handoffs,
+    "mytelegrambot": _stage_telegram,
+}
+
+
+def _execute_stage(stage: Stage, *, execute: bool) -> None:
+    # Same dry-run/skip semantics as cycle_driver.run_stage, but routed through
+    # this module's `_run` so the workspace-root cwd (and the test seam) hold.
+    if stage.skip is not None:
+        print(f"(skipping {stage.name} — {stage.skip})")
+        return
+    if stage.mutating and not execute:
+        print(f"(dry run — would run: {' '.join(stage.argv)})")
+        return
+    _run(stage.argv, env=stage.env)
+
+
 def _run_cycle(args: argparse.Namespace, *, accounts: str, skip_dispatch: bool, py: str) -> None:
     # Only a run that spends or mutates is gated; a pure dry run reports as
     # usual (matching fleet_dispatch, whose dry run also proceeds with a note).
@@ -161,135 +326,14 @@ def _run_cycle(args: argparse.Namespace, *, accounts: str, skip_dispatch: bool, 
             print(f"(cycle halted — {reason})")
             return
 
-    # 1. MyPlanner: refresh the recommended sequence.
-    _run([
-        "myplanner", "plan",
-        "--org", ORG,
-        "--repo-root", str(WORKSPACE_ROOT),
-        "--tracking-repo", TRACKING_REPO,
-        "--tracking-issue", TRACKING_ISSUE,
-        "--engine", args.engine,
-    ])
-
-    # 2. MyOrchestrator + workers: pick and close the next unit(s) of work.
-    if not skip_dispatch:
-        dispatch_cmd = [py, "-m", "myfleet.fleet_dispatch", "--accounts", accounts]
-        if args.dispatch_execute:
-            dispatch_cmd.append("--execute")
-        if args.allow_personal_token:
-            dispatch_cmd.append("--allow-personal-token")
-        _run(dispatch_cmd)
-
-    # 3. MyResearcher: brief a bounded number of open study topic issues.
-    if args.brief_count > 0:
-        if not STUDY_ROOT.exists():
-            print(f"(skipping myresearcher briefs — no study clone at {STUDY_ROOT})")
-        else:
-            candidates = _brief_candidates(args.brief_count)
-            if candidates is None:
-                print(f"(skipping myresearcher briefs — could not query {STUDY_REPO})")
-            elif not candidates:
-                print(f"(no open {RESEARCH_LABEL} issues in {STUDY_REPO} left to brief)")
-            else:
-                # ClaudeCLIEngine needs an authenticated CLI; borrow the first
-                # fleet account's CLAUDE_CONFIG_DIR (TAVILY_API_KEY is not set
-                # on this host, so retrieval sticks to keyless arXiv).
-                account = accounts.split(",")[0].strip()
-                env = {**os.environ, "CLAUDE_CONFIG_DIR": str(Path(account).expanduser())}
-                for number in candidates:
-                    brief_cmd = [
-                        "myresearcher", "brief",
-                        "--issue", str(number),
-                        "--repo", STUDY_REPO,
-                        "--repo-root", str(STUDY_ROOT),
-                        "--engine", args.engine,
-                        "--sources", "arxiv",
-                    ]
-                    if args.execute:
-                        _run(brief_cmd, env=env)
-                    else:
-                        print(f"(dry run — would run: {' '.join(brief_cmd)})")
-
-    # 4-5. Per repo: add one test, fold the ledger into CHANGELOG.md.
-    for repo in tool_repos(WORKSPACE_ROOT):
-        repo_path = WORKSPACE_ROOT / repo
-        tester_cmd = ["mytester", "run", "--source", str(repo_path), "--engine", args.engine]
-        if not args.execute:
-            tester_cmd.append("--local-only")
-        _run(tester_cmd)
-
-        changelogger_cmd = ["mychangelogger", "update", "--source", str(repo_path)]
-        if args.execute:
-            _run(changelogger_cmd)
-        else:
-            print(f"(dry run — would run: {' '.join(changelogger_cmd)})")
-
-    # 6. MyDocs: refresh the fleet docs site from each tool's README/CLAUDE.md.
-    # Deterministically skips fresh pages (hash check), so this is cheap when
-    # nothing changed; it opens (never merges) one PR when pages are stale.
-    docs_site_root = WORKSPACE_ROOT / DOCS_SITE_CLONE
-    docs_cmd = [
-        "mydocs", "sync", "--all",
-        "--repo-root", str(docs_site_root),
-        "--engine", args.engine,
-    ]
-    if not docs_site_root.is_dir():
-        print(f"(skipping mydocs — no local docs-site clone at {docs_site_root})")
-    elif args.execute:
-        _run(docs_cmd)
-    else:
-        print(f"(dry run — would run: {' '.join(docs_cmd)})")
-
-    # 7. MyDashboard: refresh the org-wide fleet dashboard page.
-    # Deterministically skips fresh pages (hash check), so this is cheap when
-    # nothing changed; it opens (never merges) one PR when the page is stale.
-    dashboard_cmd = [
-        "mydashboard", "render",
-        "--repo-root", str(docs_site_root),
-        "--workspace", str(WORKSPACE_ROOT),
-        "--engine", args.engine,
-    ]
-    if not docs_site_root.is_dir():
-        print(f"(skipping mydashboard — no local docs-site clone at {docs_site_root})")
-    elif args.execute:
-        _run(dashboard_cmd)
-    else:
-        print(f"(dry run — would run: {' '.join(dashboard_cmd)})")
-
-    # 8. MyProjector: reconcile the board + tracking-issue checklist.
-    projector_cmd = [
-        "myprojector", "sync",
-        "--org", ORG,
-        "--project-number", PROJECT_NUMBER,
-        "--tracking-repo", TRACKING_REPO,
-        "--tracking-issue", TRACKING_ISSUE,
-        "--engine", args.engine,
-    ]
-    if args.execute:
-        projector_cmd.append("--apply-checklist")
-    else:
-        projector_cmd.append("--dry-run")
-    _run(projector_cmd)
-
-    # 9. MyReporter: post the fleet-wide digest on the tracking issue.
-    reporter_cmd = [
-        "myreporter", "post",
-        "--repo", TRACKING_REPO,
-        "--issue", TRACKING_ISSUE,
-        "--repo-root", str(WORKSPACE_ROOT),
-        "--summarize",
-        "--engine", args.engine,
-    ]
-    if args.execute:
-        _run(reporter_cmd)
-    else:
-        print(f"(dry run — would run: {' '.join(reporter_cmd)})")
-
-    # 10. MyTelegramBot: push everything since the last notify.
-    if args.execute:
-        _run(["mytelegrambot", "notify"])
-    else:
-        print("(dry run — would run: mytelegrambot notify)")
+    ctx = _Ctx(args=args, accounts=accounts, skip_dispatch=skip_dispatch, py=py)
+    for item in build_plan():
+        resolver = RESOLVERS.get(item.stage)
+        if resolver is None:
+            print(f"(no resolver for graph stage {item.stage!r} — skipping)")
+            continue
+        for stage in resolver(ctx):
+            _execute_stage(stage, execute=args.execute)
 
 
 def _loop_should_stop(
