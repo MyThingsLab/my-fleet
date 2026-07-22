@@ -27,22 +27,29 @@ jobs:
           python-version: "3.12"
       # This repo's only real deps beyond my-things-core are sibling repos
       # from the same owner (not on PyPI): the orchestrator, the merge guard,
-      # and the Telegram transport used by the ASK channel.
+      # the Telegram transport used by the ASK channel, the tool-chaining
+      # graph fleet_cycle ticks, and the worker CLI fleet_dispatch shells out
+      # to. my-things-core and my-guard are v1 (pinned per RELEASE.md);
+      # my-orchestrator, my-telegram-bot, my-pipeline, and my-coder are still
+      # v0 and float on @main.
       - name: Install
         run: |
-          pip install "my-things-core @ git+https://github.com/${{ github.repository_owner }}/my-things-core@main"
+          pip install "my-things-core @ git+https://github.com/${{ github.repository_owner }}/my-things-core@v1.0.0"
           # --no-deps: its only dep is the core installed above, but its main
           # still names it "mythings-core" (pre-rename) which pip can't resolve.
           pip install --no-deps "my-orchestrator @ git+https://github.com/${{ github.repository_owner }}/my-orchestrator@main"
           # merge_ready_prs.py routes every merge through MyGuard's pr-merge ASK
           # rule, so the guard is a real dependency of this repo's scripts now.
-          pip install --no-deps "my-guard @ git+https://github.com/${{ github.repository_owner }}/my-guard@main"
+          pip install --no-deps "my-guard @ git+https://github.com/${{ github.repository_owner }}/my-guard@v1.0.0"
           # notify_usage.py / notify_systemd_status.py import mytelegrambot.transport;
           # --no-deps for the same pre-rename-metadata reason as my-orchestrator.
           pip install --no-deps "my-telegram-bot @ git+https://github.com/${{ github.repository_owner }}/my-telegram-bot@main"
           # fleet_cycle imports mypipeline.plan.build_plan to drive the cycle off
           # my-pipeline's declarative tool-chaining graph.
           pip install --no-deps "my-pipeline @ git+https://github.com/${{ github.repository_owner }}/my-pipeline@main"
+          # fleet_dispatch.py shells out to the `mycoder` CLI as the worker
+          # role instead of spawning its own inline session.
+          pip install --no-deps "my-coder @ git+https://github.com/${{ github.repository_owner }}/my-coder@main"
           pip install -e ".[dev]"
       - name: Ruff
         run: ruff check src tests
