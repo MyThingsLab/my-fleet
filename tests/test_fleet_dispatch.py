@@ -12,7 +12,13 @@ import pytest
 from mythings.ledger import Ledger, LedgerEntry
 
 import myfleet.fleet_dispatch as fd
-from myfleet.fleet_usage import UsageReport, family_for
+from myfleet.fleet_usage import family_for
+
+# Captured before any test monkeypatches fd.subprocess.run -- fakes that only
+# want to intercept one specific call (e.g. "mycoder") fall back to the real
+# subprocess.run for everything else (git, etc). Calling the module-level
+# `subprocess.run` name directly would recurse into the same monkeypatch.
+_REAL_SUBPROCESS_RUN = subprocess.run
 
 
 def _init_git_repo(path: Path) -> None:
@@ -38,52 +44,6 @@ _RTK_HOOK = {
         ]
     }
 }
-
-
-def test_config_dir_has_rtk_hook_true_when_registered(tmp_path: Path) -> None:
-    account = _account(tmp_path, _RTK_HOOK)
-    assert fd._config_dir_has_rtk_hook(account.config_dir) is True
-
-
-def test_config_dir_has_rtk_hook_false_without_hook(tmp_path: Path) -> None:
-    account = _account(tmp_path, {"model": "sonnet"})
-    assert fd._config_dir_has_rtk_hook(account.config_dir) is False
-
-
-def test_config_dir_has_rtk_hook_false_when_no_settings_file(tmp_path: Path) -> None:
-    assert fd._config_dir_has_rtk_hook(tmp_path) is False
-
-
-def test_config_dir_has_rtk_hook_false_on_malformed_json(tmp_path: Path) -> None:
-    (tmp_path / "settings.json").write_text("{not json")
-    assert fd._config_dir_has_rtk_hook(tmp_path) is False
-
-
-def test_preflight_reports_missing_hook_per_account(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(fd.shutil, "which", lambda _: "/usr/bin/rtk")
-    good = _account(tmp_path / "a", _RTK_HOOK)
-    bad = _account(tmp_path / "b", {"model": "sonnet"})
-
-    problems = fd._preflight_rtk([good, bad])
-
-    assert len(problems) == 1
-    assert str(bad.config_dir) in problems[0]
-
-
-def test_preflight_reports_rtk_not_on_path(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(fd.shutil, "which", lambda _: None)
-    good = _account(tmp_path, _RTK_HOOK)
-
-    problems = fd._preflight_rtk([good])
-
-    assert any("not on PATH" in p for p in problems)
-
-
-def test_preflight_clean_when_all_wired(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(fd.shutil, "which", lambda _: "/usr/bin/rtk")
-    account = _account(tmp_path, _RTK_HOOK)
-
-    assert fd._preflight_rtk([account]) == []
 
 
 def _account_with_uuid(config_dir: Path, uuid: str | None) -> fd.Account:
@@ -127,49 +87,6 @@ def test_preflight_distinct_accounts_flags_unreadable_identity(tmp_path: Path) -
     assert "can't read an account identity" in problems[0]
 
 
-def test_with_rtk_allowlist_mirrors_bash_entries_only() -> None:
-    tools = ["Read", "Edit", "Bash(git *)", "Bash(pytest*)"]
-
-    mirrored = fd._with_rtk_allowlist(tools)
-
-    # Original entries preserved, non-Bash entries not mirrored.
-    assert mirrored[: len(tools)] == tools
-    assert "Bash(rtk git *)" in mirrored
-    assert "Bash(rtk pytest*)" in mirrored
-    assert "Bash(rtk Read)" not in mirrored
-    assert "rtk Edit" not in " ".join(mirrored)
-
-
-def test_with_rtk_allowlist_rewritten_command_would_match() -> None:
-    # `git status` -> rtk rewrites to `rtk git status`; the mirrored pattern
-    # Bash(rtk git *) is what makes that pass the allowlist.
-    mirrored = fd._with_rtk_allowlist(["Bash(git *)"])
-    assert "Bash(rtk git *)" in mirrored
-
-
-@pytest.mark.parametrize("rtk", [True, False])
-def test_record_usage_marks_whether_rtk_was_active(tmp_path: Path, rtk: bool) -> None:
-    ledger = Ledger(tmp_path / "ledger.jsonl")
-    report = UsageReport(cost_usd=0.01, input_tokens=100, output_tokens=20, num_turns=1)
-    account = fd.Account(name="account1", config_dir=tmp_path)
-    candidate = fd.Candidate(
-        id="myrepo#1", repo="myrepo", tool="", title="t", kind="issue", created_at=""
-    )
-
-    fd._record_usage(
-        report,
-        account=account,
-        candidate=candidate,
-        transcript_path=tmp_path / "t.jsonl",
-        ledger=ledger,
-        rtk=rtk,
-    )
-
-    (entry,) = [e for e in ledger.read() if e.kind == "usage"]
-    assert entry.data["rtk"] is rtk
-    assert entry.data["input_tokens"] == 100
-
-
 def test_main_dispatches_accounts_concurrently(tmp_path: Path, monkeypatch) -> None:
     # Regression test for the bug this fix closes: main()'s dispatch loop used
     # to call _dispatch_one sequentially, so two accounts' work never
@@ -180,7 +97,7 @@ def test_main_dispatches_accounts_concurrently(tmp_path: Path, monkeypatch) -> N
     calls_lock = threading.Lock()
 
     def fake_dispatch_one(
-        account, candidate, *, execute, max_budget_usd, max_turns, ledger, org, prior=None, rtk=False, ready_timeout=0.0, session_timeout_s=1800.0
+        account, candidate, *, execute, max_budget_usd, max_turns, ledger, org, prior=None, ready_timeout=0.0, session_timeout_s=1800.0
     ):
         start = time.monotonic()
         time.sleep(0.2)
@@ -227,7 +144,7 @@ def test_main_surfaces_every_account_failure_not_just_first(
     # dropping any other account's crash. Both accounts fail here on purpose;
     # both should still be reported.
     def fake_dispatch_one(
-        account, candidate, *, execute, max_budget_usd, max_turns, ledger, org, prior=None, rtk=False, ready_timeout=0.0, session_timeout_s=1800.0
+        account, candidate, *, execute, max_budget_usd, max_turns, ledger, org, prior=None, ready_timeout=0.0, session_timeout_s=1800.0
     ):
         raise RuntimeError(f"boom-{account.name}")
 
@@ -316,7 +233,7 @@ def test_main_skips_issue_with_open_pr_in_flight(tmp_path: Path, monkeypatch) ->
     dispatched: list[str] = []
 
     def fake_dispatch_one(
-        account, candidate, *, execute, max_budget_usd, max_turns, ledger, org, prior=None, rtk=False, ready_timeout=0.0, session_timeout_s=1800.0
+        account, candidate, *, execute, max_budget_usd, max_turns, ledger, org, prior=None, ready_timeout=0.0, session_timeout_s=1800.0
     ):
         dispatched.append(candidate.id)
 
@@ -345,7 +262,7 @@ def test_main_skips_issue_with_open_pr_in_flight(tmp_path: Path, monkeypatch) ->
     monkeypatch.setattr(
         fd,
         "_open_pr_number",
-        lambda org, repo, branch: 99 if branch == fd._branch_name(candidates[0]) else None,
+        lambda org, repo, branch: 99 if branch == fd._mycoder_branch(candidates[0]) else None,
     )
 
     rc = fd.main(["--accounts", f"{tmp_path / 'a'}"])
@@ -356,27 +273,6 @@ def test_main_skips_issue_with_open_pr_in_flight(tmp_path: Path, monkeypatch) ->
 
 
 # --- A: honest success detection -------------------------------------------
-
-
-def test_dispatch_outcome_no_commits_is_not_success() -> None:
-    outcome, msg = fd._dispatch_outcome(0, None)
-    assert outcome == "no_changes"
-    assert "committed nothing" in msg
-
-
-def test_dispatch_outcome_commits_without_pr_needs_review() -> None:
-    outcome, msg = fd._dispatch_outcome(2, None)
-    assert outcome == "needs_review"
-    assert "no PR" in msg
-
-
-def test_dispatch_outcome_commits_and_pr_is_success() -> None:
-    outcome, msg = fd._dispatch_outcome(3, 22)
-    assert outcome == "success"
-    assert "#22" in msg
-
-
-# --- B: read-only shell recognised, mutation stays friction ----------------
 
 
 @pytest.mark.parametrize(
@@ -403,75 +299,6 @@ def test_family_for_readonly_vs_mutation(command: str, expected: str | None) -> 
     assert family_for(command) == expected
 
 
-def test_default_allowed_tools_has_readonly_not_mutation() -> None:
-    assert "Bash(ls*)" in fd.DEFAULT_ALLOWED_TOOLS
-    assert "Bash(grep*)" in fd.DEFAULT_ALLOWED_TOOLS
-    # Never proactively allow mutation/code-execution.
-    assert "Bash(rm*)" not in fd.DEFAULT_ALLOWED_TOOLS
-    assert "Bash(find*)" not in fd.DEFAULT_ALLOWED_TOOLS
-
-
-# --- C: prompt tells the worker it is non-interactive ----------------------
-
-
-def test_prompt_is_noninteractive_and_prefers_native_tools() -> None:
-    candidate = fd.Candidate(
-        id="myrepo#7", repo="myrepo", tool="", title="t", kind="issue", created_at=""
-    )
-    prompt = fd._prompt_for(candidate)
-    assert "non-interactively" in prompt
-    assert "will never come" in prompt
-    assert "Read" in prompt
-
-
-def test_save_allowed_tools_commit_ignores_unrelated_staged_changes(
-    tmp_path: Path, monkeypatch
-) -> None:
-    # The self-edit commit runs in a live checkout that may have other staged
-    # changes; it must commit ONLY allowed_tools.json + ledger, never sweep an
-    # unrelated staged file into the auto-widen commit.
-    _init_git_repo(tmp_path)
-    monkeypatch.setattr(fd, "WORKSPACE_ROOT", tmp_path)
-    monkeypatch.setattr(fd, "ALLOWED_TOOLS_PATH", tmp_path / ".fleet-dispatch" / "allowed_tools.json")
-    monkeypatch.setattr(fd, "DISPATCH_LEDGER", tmp_path / ".fleet-dispatch" / "ledger.jsonl")
-    fd.DISPATCH_LEDGER.parent.mkdir(parents=True, exist_ok=True)
-    fd.DISPATCH_LEDGER.write_text("{}\n")
-
-    unrelated = tmp_path / "unrelated.py"
-    unrelated.write_text("x = 1\n")
-    subprocess.run(["git", "-C", str(tmp_path), "add", "unrelated.py"], check=True)
-
-    fd._save_allowed_tools(["Read", "Bash(ls*)"], commit_message="widen")
-
-    committed = subprocess.run(
-        ["git", "-C", str(tmp_path), "show", "--name-only", "--format=", "HEAD"],
-        capture_output=True, text=True, check=True,
-    ).stdout.split()
-    assert ".fleet-dispatch/allowed_tools.json" in committed
-    assert "unrelated.py" not in committed
-    # The unrelated file stays staged, uncommitted -- untouched by the self-edit.
-    still_staged = subprocess.run(
-        ["git", "-C", str(tmp_path), "diff", "--cached", "--name-only"],
-        capture_output=True, text=True, check=True,
-    ).stdout.split()
-    assert "unrelated.py" in still_staged
-
-
-# --- resume / recover loop -------------------------------------------------
-
-
-def test_parse_blocker_extracts_ref_else_none() -> None:
-    assert fd._parse_blocker("done\nFLEET-DISPATCH-BLOCKED: MyThingsLab/core#9") == "MyThingsLab/core#9"
-    assert fd._parse_blocker("  FLEET-DISPATCH-BLOCKED: org/repo#12  ") == "org/repo#12"
-    assert fd._parse_blocker("no marker here") is None
-    assert fd._parse_blocker("FLEET-DISPATCH-BLOCKED:") is None
-
-
-def test_default_allowed_tools_can_create_issues_for_blockers() -> None:
-    # Filing a cross-repo blocker issue is part of the loop -> gh issue create.
-    assert "Bash(gh issue create*)" in fd.DEFAULT_ALLOWED_TOOLS
-
-
 @pytest.mark.parametrize(
     ("attempt", "blocker_open", "expected"),
     [
@@ -483,6 +310,9 @@ def test_default_allowed_tools_can_create_issues_for_blockers() -> None:
         (fd.Attempt("i#1", "needs_review", "b", 1), False, "resume"),
         (fd.Attempt("i#1", "no_changes", "b", 2), False, "resume"),
         (fd.Attempt("i#1", "failed", "b", 3), False, "skip:needs_human"),  # hit the cap
+        # my-coder's own vocabulary: both are stopping points, never resumed.
+        (fd.Attempt("i#1", "denied", "b", 1), False, "skip:done"),
+        (fd.Attempt("i#1", "skipped", "b", 1), False, "skip:done"),
     ],
 )
 def test_dispatch_decision(attempt, blocker_open: bool, expected: str) -> None:
@@ -504,29 +334,6 @@ def test_last_attempt_reads_latest_terminal_and_counts_attempts(tmp_path: Path) 
     assert a.attempt_number == 2  # two terminal entries; "started" doesn't count
     assert a.branch == "b"
     assert fd._last_attempt(led, "nope#9") is None
-
-
-def test_resume_prompt_carries_prior_context_and_blocker_protocol() -> None:
-    candidate = fd.Candidate(id="r#1", repo="r", tool="", title="t", kind="issue", created_at="")
-    prior = fd.Attempt("r#1", "needs_review", "b", 1, final_message="got halfway")
-    prompt = fd._prompt_for(candidate, prior)
-    assert "RESUMED ATTEMPT" in prompt
-    assert "Do NOT start over" in prompt
-    assert "got halfway" in prompt
-    # Blocker protocol present on every prompt (fresh too).
-    assert "FLEET-DISPATCH-BLOCKED:" in fd._prompt_for(candidate)
-
-
-def test_resume_prompt_wording_matches_whether_a_branch_exists() -> None:
-    candidate = fd.Candidate(id="r#1", repo="r", tool="", title="t", kind="issue", created_at="")
-    prior = fd.Attempt("r#1", "failed", "b", 1)
-    with_branch = fd._prompt_for(candidate, prior, has_branch=True)
-    without_branch = fd._prompt_for(candidate, prior, has_branch=False)
-    assert "branch it left behind" in with_branch
-    # A failed run that left no commits (e.g. a session limit) must not promise a
-    # branch that isn't there.
-    assert "branch it left behind" not in without_branch
-    assert "starting from main" in without_branch
 
 
 @pytest.mark.parametrize(
@@ -582,7 +389,7 @@ def test_main_resumes_or_skips_by_prior_attempt(tmp_path: Path, monkeypatch) -> 
     got: dict[str, object] = {}
 
     def fake_dispatch_one(
-        account, candidate, *, execute, max_budget_usd, max_turns, ledger, org, prior=None, rtk=False, ready_timeout=0.0, session_timeout_s=1800.0
+        account, candidate, *, execute, max_budget_usd, max_turns, ledger, org, prior=None, ready_timeout=0.0, session_timeout_s=1800.0
     ):
         got[candidate.id] = prior
 
@@ -634,46 +441,6 @@ def test_main_resumes_or_skips_by_prior_attempt(tmp_path: Path, monkeypatch) -> 
 # --- deny-reads shrink what a worker may read ------------------------------
 
 
-def test_default_deny_reads_cover_noise_dirs_not_source() -> None:
-    joined = " ".join(fd.DEFAULT_DENY_READS)
-    assert "Read(**/.venv/**)" in fd.DEFAULT_DENY_READS
-    assert "Read(**/__pycache__/**)" in fd.DEFAULT_DENY_READS
-    assert "Read(**/dev-ledger/**)" in fd.DEFAULT_DENY_READS
-    # Source and tests must never be denied -- the worker needs to read them.
-    assert "src" not in joined
-    assert "tests" not in joined
-
-
-def test_prompt_requires_draft_pr_and_checklist() -> None:
-    candidate = fd.Candidate(
-        id="myrepo#7", repo="myrepo", tool="", title="t", kind="issue", created_at=""
-    )
-    prompt = fd._prompt_for(candidate)
-    assert "--draft" in prompt
-    assert "Closes #7" in prompt
-    assert "do NOT mark it ready" in prompt
-
-
-# --- PR merge-readiness: draft promoted only on checklist + green CI --------
-
-
-def test_pr_body_ok_requires_closes_and_checked_box() -> None:
-    ok, _ = fd._pr_body_ok("Closes #7\n- [x] pytest passes", "7")
-    assert ok is True
-
-
-def test_pr_body_ok_rejects_missing_closes() -> None:
-    ok, why = fd._pr_body_ok("- [x] pytest passes", "7")
-    assert ok is False
-    assert "Closes #7" in why
-
-
-def test_pr_body_ok_rejects_unchecked_checklist() -> None:
-    ok, why = fd._pr_body_ok("Closes #7\n- [ ] pytest passes", "7")
-    assert ok is False
-    assert "checklist" in why
-
-
 @pytest.mark.parametrize(
     ("buckets", "expected"),
     [
@@ -700,51 +467,44 @@ def test_wait_for_checks_returns_pending_on_timeout(monkeypatch) -> None:
     assert fd._wait_for_checks("org", "repo", 1, timeout=0) == "pending"
 
 
-def test_finalize_pr_promotes_and_succeeds_when_body_ok_and_ci_green(monkeypatch) -> None:
-    promoted: list[int] = []
-    monkeypatch.setattr(fd, "_pr_body", lambda *a, **k: "Closes #7\n- [x] pytest passes")
-    monkeypatch.setattr(fd, "_wait_for_checks", lambda *a, **k: "pass")
-    monkeypatch.setattr(fd, "_promote_pr", lambda org, repo, n: promoted.append(n))
+def test_finalize_pr_needs_review_when_tests_not_passed(monkeypatch) -> None:
+    # Trusts my-coder's own structured tests_passed signal directly -- never
+    # promoted without it, regardless of CI state.
+    promoted = []
+    monkeypatch.setattr(fd, "_checks_state", lambda *a, **k: "pass")
+    monkeypatch.setattr(fd, "_promote_pr", lambda *a, **k: promoted.append(a))
 
-    outcome, _ = fd._finalize_pr("org", "repo", "7", 42, ready_timeout=0)
-
-    # Success -- the only path that maps to a mergeable, promoted PR.
-    assert outcome == "success"
-    assert promoted == [42]
-
-
-def test_finalize_pr_needs_review_and_stays_draft_when_ci_fails(monkeypatch) -> None:
-    promoted: list[int] = []
-    monkeypatch.setattr(fd, "_pr_body", lambda *a, **k: "Closes #7\n- [x] pytest passes")
-    monkeypatch.setattr(fd, "_wait_for_checks", lambda *a, **k: "fail")
-    monkeypatch.setattr(fd, "_promote_pr", lambda org, repo, n: promoted.append(n))
-
-    outcome, msg = fd._finalize_pr("org", "repo", "7", 42, ready_timeout=0)
+    outcome, msg = fd._finalize_pr("org", "repo", 42, tests_passed=None, ready_timeout=0)
 
     assert outcome == "needs_review"
-    assert "CI failing" in msg
+    assert "did not report tests passing" in msg
     assert promoted == []
 
 
-def test_finalize_pr_needs_review_when_body_incomplete(monkeypatch) -> None:
-    promoted: list[int] = []
-    monkeypatch.setattr(fd, "_pr_body", lambda *a, **k: "no closes line here")
-    monkeypatch.setattr(fd, "_wait_for_checks", lambda *a, **k: "pass")
-    monkeypatch.setattr(fd, "_promote_pr", lambda org, repo, n: promoted.append(n))
+def test_finalize_pr_promotes_when_tests_passed_and_ci_green(monkeypatch) -> None:
+    promoted = []
+    monkeypatch.setattr(fd, "_checks_state", lambda *a, **k: "pass")
+    monkeypatch.setattr(fd, "_promote_pr", lambda org, repo, number: promoted.append(number))
 
-    outcome, _ = fd._finalize_pr("org", "repo", "7", 42, ready_timeout=0)
+    outcome, msg = fd._finalize_pr("org", "repo", 42, tests_passed=True, ready_timeout=0)
 
+    assert outcome == "success"
+    assert "promoted to ready" in msg
+    assert promoted == [42]
+
+
+def test_finalize_pr_needs_review_when_ci_fails(monkeypatch) -> None:
+    monkeypatch.setattr(fd, "_checks_state", lambda *a, **k: "fail")
+    outcome, msg = fd._finalize_pr("org", "repo", 42, tests_passed=True, ready_timeout=0)
     assert outcome == "needs_review"
-    assert promoted == []  # a green CI never promotes a PR whose body is incomplete
+    assert "CI failing" in msg
 
 
 def test_finalize_pr_needs_review_when_no_ci_checks(monkeypatch) -> None:
-    monkeypatch.setattr(fd, "_pr_body", lambda *a, **k: "Closes #7\n- [x] pytest passes")
-    monkeypatch.setattr(fd, "_wait_for_checks", lambda *a, **k: "none")
-
-    outcome, _ = fd._finalize_pr("org", "repo", "7", 42, ready_timeout=0)
-
+    monkeypatch.setattr(fd, "_checks_state", lambda *a, **k: "none")
+    outcome, msg = fd._finalize_pr("org", "repo", 42, tests_passed=True, ready_timeout=0)
     assert outcome == "needs_review"
+    assert "no CI checks" in msg
 
 
 def test_abort_arms_halt_marker_without_needing_accounts(tmp_path: Path, monkeypatch) -> None:
@@ -1156,47 +916,6 @@ def test_main_escalates_blocker_on_needs_human(tmp_path: Path, monkeypatch) -> N
     assert escalate_calls[0]["attempt"] == fd.MAX_ATTEMPTS
 
 
-def test_dispatch_one_passes_max_turns_and_max_budget_to_claude(tmp_path: Path, monkeypatch) -> None:
-    repo_path = tmp_path / "repo"
-    repo_path.mkdir()
-    _init_git_repo(repo_path)
-    subprocess.run(["git", "-C", str(repo_path), "branch", "-M", "main"], check=True)
-
-    monkeypatch.setattr(fd, "WORKSPACE_ROOT", tmp_path)
-    monkeypatch.setattr(fd, "TRANSCRIPTS_DIR", tmp_path / "transcripts")
-    monkeypatch.setattr(fd, "_open_pr_number", lambda *a, **k: None)
-
-    captured: dict = {}
-    real_run = fd.subprocess.run
-
-    def fake_run(argv, *args, **kwargs):
-        if argv and argv[0] == "claude":
-            captured["argv"] = argv
-            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
-        return real_run(argv, *args, **kwargs)
-
-    monkeypatch.setattr(fd.subprocess, "run", fake_run)
-
-    candidate = fd.Candidate(
-        id="repo#1", repo="repo", tool="", title="t", kind="issue", created_at="2020-01-01"
-    )
-    account = _account(tmp_path / "cfg", {"model": "sonnet"})
-
-    fd._dispatch_one(
-        account,
-        candidate,
-        execute=True,
-        max_budget_usd=1.5,
-        max_turns=7,
-        ledger=Ledger(tmp_path / "ledger.jsonl"),
-        org="MyThingsLab",
-    )
-
-    argv = captured["argv"]
-    assert argv[argv.index("--max-turns") + 1] == "7"
-    assert argv[argv.index("--max-budget-usd") + 1] == "1.5"
-
-
 def test_main_execute_refuses_personal_token_without_optin(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
@@ -1335,181 +1054,6 @@ def test_main_dry_run_needs_no_identity_optin(tmp_path: Path, monkeypatch) -> No
     assert len(calls) == 1  # the dry-run _dispatch_one still reports
 
 
-def test_dispatch_one_bases_fresh_worktree_on_origin_main(tmp_path: Path, monkeypatch) -> None:
-    # The local checkout deliberately lags origin: a fresh dispatch must cut
-    # its worktree from origin's main (fetched), not the stale local one.
-    origin = tmp_path / "origin.git"
-    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
-
-    repo_path = tmp_path / "repo"
-    repo_path.mkdir()
-    _init_git_repo(repo_path)
-    subprocess.run(["git", "-C", str(repo_path), "branch", "-M", "main"], check=True)
-    subprocess.run(
-        ["git", "-C", str(repo_path), "remote", "add", "origin", str(origin)], check=True
-    )
-    subprocess.run(["git", "-C", str(repo_path), "push", "-q", "origin", "main"], check=True)
-
-    # Advance origin past the local checkout via a second clone.
-    other = tmp_path / "other"
-    subprocess.run(["git", "clone", "-q", str(origin), str(other)], check=True)
-    subprocess.run(["git", "-C", str(other), "config", "user.email", "t@t"], check=True)
-    subprocess.run(["git", "-C", str(other), "config", "user.name", "t"], check=True)
-    (other / "newer").write_text("newer")
-    subprocess.run(["git", "-C", str(other), "add", "newer"], check=True)
-    subprocess.run(["git", "-C", str(other), "commit", "-qm", "newer on origin"], check=True)
-    subprocess.run(["git", "-C", str(other), "push", "-q", "origin", "main"], check=True)
-
-    monkeypatch.setattr(fd, "WORKSPACE_ROOT", tmp_path)
-    monkeypatch.setattr(fd, "TRANSCRIPTS_DIR", tmp_path / "transcripts")
-    monkeypatch.setattr(fd, "_open_pr_number", lambda *a, **k: None)
-
-    seen: dict = {}
-    real_run = fd.subprocess.run
-
-    def fake_run(argv, *args, **kwargs):
-        if argv and argv[0] == "claude":
-            tree = kwargs["cwd"]
-            seen["has_newer"] = (Path(tree) / "newer").exists()
-            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
-        return real_run(argv, *args, **kwargs)
-
-    monkeypatch.setattr(fd.subprocess, "run", fake_run)
-
-    candidate = fd.Candidate(
-        id="repo#1", repo="repo", tool="", title="t", kind="issue", created_at="2020-01-01"
-    )
-    fd._dispatch_one(
-        _account(tmp_path / "cfg", {}),
-        candidate,
-        execute=True,
-        max_budget_usd=1.0,
-        max_turns=5,
-        ledger=Ledger(tmp_path / "ledger.jsonl"),
-        org="MyThingsLab",
-    )
-
-    assert seen["has_newer"] is True
-
-
-def test_dispatch_one_falls_back_to_local_main_without_origin(
-    tmp_path: Path, monkeypatch, capsys
-) -> None:
-    candidate, account, ledger = _setup_dispatch_one_repo(tmp_path, monkeypatch)
-
-    real_run = fd.subprocess.run
-
-    def fake_run(argv, *args, **kwargs):
-        if argv and argv[0] == "claude":
-            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
-        return real_run(argv, *args, **kwargs)
-
-    monkeypatch.setattr(fd.subprocess, "run", fake_run)
-
-    fd._dispatch_one(
-        account,
-        candidate,
-        execute=True,
-        max_budget_usd=1.0,
-        max_turns=5,
-        ledger=ledger,
-        org="MyThingsLab",
-    )
-
-    assert "basing on local main" in capsys.readouterr().out
-
-
-def test_redact_secrets_removes_full_token_and_names_pattern() -> None:
-    # Planted token built by concatenation so this source line never trips a
-    # diff-based secret scan itself.
-    token = "ghp_" + "a" * 40
-    clean, leaked = fd._redact_secrets(f"before {token} after")
-    assert token not in clean
-    assert "[REDACTED-github_token]" in clean
-    assert "before " in clean and " after" in clean
-    assert leaked == ["github_token"]
-
-
-def test_redact_secrets_clean_text_untouched() -> None:
-    text = "nothing secret here\njust output\n"
-    clean, leaked = fd._redact_secrets(text)
-    assert clean == text
-    assert leaked == []
-
-
-def test_dispatch_one_redacts_transcript_and_ledgers_alert(tmp_path: Path, monkeypatch) -> None:
-    candidate, account, ledger = _setup_dispatch_one_repo(tmp_path, monkeypatch)
-    token = "ghp_" + "b" * 40
-    stdout = (
-        json.dumps(
-            {
-                "type": "result",
-                "result": f"done, and here is a leak: {token}",
-                "total_cost_usd": 0.05,
-                "usage": {"output_tokens": 10},
-                "num_turns": 1,
-            }
-        )
-        + "\n"
-    )
-
-    real_run = fd.subprocess.run
-
-    def fake_run(argv, *args, **kwargs):
-        if argv and argv[0] == "claude":
-            return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
-        return real_run(argv, *args, **kwargs)
-
-    monkeypatch.setattr(fd.subprocess, "run", fake_run)
-
-    fd._dispatch_one(
-        account,
-        candidate,
-        execute=True,
-        max_budget_usd=1.0,
-        max_turns=5,
-        ledger=ledger,
-        org="MyThingsLab",
-    )
-
-    (transcript,) = (tmp_path / "transcripts").iterdir()
-    persisted = transcript.read_text()
-    assert token not in persisted
-    assert "[REDACTED-github_token]" in persisted
-
-    entries = list(ledger.read(tool="fleet_dispatch"))
-    (alert,) = [e for e in entries if e.kind == "secret_alert"]
-    assert alert.outcome == "redacted"
-    assert alert.data["patterns"] == ["github_token"]
-    # The outcome entry's final_message must carry the redaction, not the token.
-    assert not any(token in e.data.get("final_message", "") for e in entries)
-
-
-def test_dispatch_one_clean_transcript_writes_no_alert(tmp_path: Path, monkeypatch) -> None:
-    candidate, account, ledger = _setup_dispatch_one_repo(tmp_path, monkeypatch)
-
-    real_run = fd.subprocess.run
-
-    def fake_run(argv, *args, **kwargs):
-        if argv and argv[0] == "claude":
-            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
-        return real_run(argv, *args, **kwargs)
-
-    monkeypatch.setattr(fd.subprocess, "run", fake_run)
-
-    fd._dispatch_one(
-        account,
-        candidate,
-        execute=True,
-        max_budget_usd=1.0,
-        max_turns=5,
-        ledger=ledger,
-        org="MyThingsLab",
-    )
-
-    assert not any(e.kind == "secret_alert" for e in ledger.read(tool="fleet_dispatch"))
-
-
 def test_main_requires_all_three_app_flags_together(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("GH_TOKEN", raising=False)
 
@@ -1579,81 +1123,234 @@ def _setup_dispatch_one_repo(tmp_path: Path, monkeypatch) -> tuple[fd.Candidate,
     return candidate, account, ledger
 
 
-def test_dispatch_one_worker_env_inherits_gh_token_from_process(
-    tmp_path: Path, monkeypatch
-) -> None:
-    # The whole point of setting os.environ["GH_TOKEN"] once in main(): the
-    # spawned worker's `env = {**os.environ, ...}` picks it up with no
-    # separate wiring. Prove that inheritance directly against _dispatch_one.
-    monkeypatch.setenv("GH_TOKEN", "ghs_from_app")
+def _fake_mycoder_run(**result_fields):
+    # Stands in for the `mycoder build --json` subprocess call: returns its
+    # canned JSON on stdout for a "mycoder" argv, real git for anything else
+    # (the _fresh_base_ref pre-fetch _dispatch_one still does).
+    payload = {
+        "outcome": None,
+        "detail": "",
+        "issue": 1,
+        "pr": None,
+        "files_touched": [],
+        "tests_passed": None,
+        "cost_usd": 0.01,
+        "attempts": 1,
+        "blocker": None,
+        **result_fields,
+    }
+
+    def fake_run(argv, **kwargs):
+        if argv[0] == "mycoder":
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(payload), stderr="")
+        return _REAL_SUBPROCESS_RUN(argv, **kwargs)
+
+    return fake_run
+
+
+def test_dispatch_one_dry_run_never_calls_mycoder(tmp_path: Path, monkeypatch) -> None:
     candidate, account, ledger = _setup_dispatch_one_repo(tmp_path, monkeypatch)
-
-    captured: dict = {}
-    real_run = fd.subprocess.run
-
-    def fake_run(argv, *args, **kwargs):
-        if argv and argv[0] == "claude":
-            captured["kwargs"] = kwargs
-            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
-        return real_run(argv, *args, **kwargs)
-
-    monkeypatch.setattr(fd.subprocess, "run", fake_run)
+    calls = []
+    monkeypatch.setattr(fd.subprocess, "run", lambda argv, **k: calls.append(argv))
 
     fd._dispatch_one(
-        account, candidate, execute=True, max_budget_usd=1.5, max_turns=7,
+        account, candidate, execute=False, max_budget_usd=1.0, max_turns=10,
         ledger=ledger, org="MyThingsLab",
     )
 
-    assert captured["kwargs"]["env"]["GH_TOKEN"] == "ghs_from_app"
+    assert calls == []
 
 
-def test_dispatch_one_passes_session_timeout_to_claude(tmp_path: Path, monkeypatch) -> None:
+def test_dispatch_one_builds_mycoder_argv(tmp_path: Path, monkeypatch) -> None:
     candidate, account, ledger = _setup_dispatch_one_repo(tmp_path, monkeypatch)
+    captured = {}
 
-    captured: dict = {}
-    real_run = fd.subprocess.run
-
-    def fake_run(argv, *args, **kwargs):
-        if argv and argv[0] == "claude":
-            captured["kwargs"] = kwargs
-            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
-        return real_run(argv, *args, **kwargs)
+    def fake_run(argv, **kwargs):
+        if argv[0] == "mycoder":
+            captured["argv"] = argv
+            captured["env"] = kwargs.get("env")
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=json.dumps({"outcome": "no_changes", "detail": "nothing to do"})
+            )
+        return _REAL_SUBPROCESS_RUN(argv, **kwargs)
 
     monkeypatch.setattr(fd.subprocess, "run", fake_run)
 
     fd._dispatch_one(
-        account, candidate, execute=True, max_budget_usd=1.5, max_turns=7,
-        ledger=ledger, org="MyThingsLab", session_timeout_s=42.0,
+        account, candidate, execute=True, max_budget_usd=2.5, max_turns=15,
+        ledger=ledger, org="MyThingsLab", session_timeout_s=900.0,
     )
 
-    assert captured["kwargs"]["timeout"] == 42.0
+    argv = captured["argv"]
+    assert argv[:2] == ["mycoder", "build"]
+    assert "--repo" in argv and argv[argv.index("--repo") + 1] == "MyThingsLab/repo"
+    assert "--issue" in argv and argv[argv.index("--issue") + 1] == "1"
+    assert "--max-budget-usd" in argv and argv[argv.index("--max-budget-usd") + 1] == "2.5"
+    assert "--max-turns" in argv and argv[argv.index("--max-turns") + 1] == "15"
+    assert "--session-timeout-s" in argv and argv[argv.index("--session-timeout-s") + 1] == "900.0"
+    assert "--run-tests" in argv
+    assert "--json" in argv
+    assert captured["env"]["CLAUDE_CONFIG_DIR"] == str(account.config_dir)
 
 
-def test_dispatch_one_records_deferred_on_session_timeout(tmp_path: Path, monkeypatch) -> None:
-    # Regression test: --max-budget-usd/--max-turns bound spend and turn count
-    # but not wall-clock time, so a stalled session used to hang its worker
-    # thread forever with no backstop. A subprocess.TimeoutExpired must be
-    # caught and routed to the existing 'deferred' (transient, resumable, not
-    # counted toward MAX_ATTEMPTS) outcome -- not left to propagate and crash
-    # the dispatch, and not miscounted as a real 'failed' attempt.
+@pytest.mark.parametrize(
+    ("mycoder_outcome", "expected_outcome"),
+    [
+        ("no_changes", "no_changes"),
+        ("needs_review", "needs_review"),
+        ("denied", "denied"),
+        ("skipped", "skipped"),
+    ],
+)
+def test_dispatch_one_passes_through_mycoder_outcomes(
+    tmp_path: Path, monkeypatch, mycoder_outcome: str, expected_outcome: str
+) -> None:
+    candidate, account, ledger = _setup_dispatch_one_repo(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        fd.subprocess, "run", _fake_mycoder_run(outcome=mycoder_outcome, detail="detail text")
+    )
+
+    fd._dispatch_one(
+        account, candidate, execute=True, max_budget_usd=1.0, max_turns=10, ledger=ledger,
+        org="MyThingsLab",
+    )
+
+    (entry,) = [e for e in ledger.read() if e.kind == "dispatch" and e.outcome != "started"]
+    assert entry.outcome == expected_outcome
+
+
+def test_dispatch_one_translates_failure_to_failed(tmp_path: Path, monkeypatch) -> None:
+    candidate, account, ledger = _setup_dispatch_one_repo(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        fd.subprocess, "run", _fake_mycoder_run(outcome="failure", detail="AssertionError")
+    )
+
+    fd._dispatch_one(
+        account, candidate, execute=True, max_budget_usd=1.0, max_turns=10, ledger=ledger,
+        org="MyThingsLab",
+    )
+
+    (entry,) = [e for e in ledger.read() if e.kind == "dispatch" and e.outcome != "started"]
+    assert entry.outcome == "failed"
+
+
+def test_dispatch_one_reclassifies_transient_failure_as_deferred(
+    tmp_path: Path, monkeypatch
+) -> None:
+    candidate, account, ledger = _setup_dispatch_one_repo(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        fd.subprocess, "run",
+        _fake_mycoder_run(outcome="failure", detail="claude exited 1: session limit reached"),
+    )
+
+    fd._dispatch_one(
+        account, candidate, execute=True, max_budget_usd=1.0, max_turns=10, ledger=ledger,
+        org="MyThingsLab",
+    )
+
+    (entry,) = [e for e in ledger.read() if e.kind == "dispatch" and e.outcome != "started"]
+    assert entry.outcome == "deferred"
+
+
+def test_dispatch_one_records_blocker_from_mycoder_result(tmp_path: Path, monkeypatch) -> None:
+    candidate, account, ledger = _setup_dispatch_one_repo(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        fd.subprocess, "run",
+        _fake_mycoder_run(
+            outcome="blocked", detail="paused on cross-repo blocker MyThingsLab/my-guard#7",
+            blocker="MyThingsLab/my-guard#7",
+        ),
+    )
+
+    fd._dispatch_one(
+        account, candidate, execute=True, max_budget_usd=1.0, max_turns=10, ledger=ledger,
+        org="MyThingsLab",
+    )
+
+    (entry,) = [e for e in ledger.read() if e.kind == "dispatch" and e.outcome != "started"]
+    assert entry.outcome == "blocked"
+    assert entry.data["blocker"] == "MyThingsLab/my-guard#7"
+
+
+def test_dispatch_one_success_runs_the_readiness_gate(tmp_path: Path, monkeypatch) -> None:
+    candidate, account, ledger = _setup_dispatch_one_repo(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        fd.subprocess, "run",
+        _fake_mycoder_run(outcome="success", detail="opened draft PR #9", pr=9, tests_passed=True),
+    )
+    finalize_calls = []
+    monkeypatch.setattr(
+        fd,
+        "_finalize_pr",
+        lambda org, repo, pr_number, *, tests_passed, ready_timeout: (
+            finalize_calls.append((pr_number, tests_passed)) or ("success", "promoted")
+        ),
+    )
+
+    fd._dispatch_one(
+        account, candidate, execute=True, max_budget_usd=1.0, max_turns=10, ledger=ledger,
+        org="MyThingsLab",
+    )
+
+    assert finalize_calls == [(9, True)]
+    (entry,) = [e for e in ledger.read() if e.kind == "dispatch" and e.outcome != "started"]
+    assert entry.outcome == "success"
+    assert entry.data["pr_number"] == 9
+
+
+def test_dispatch_one_records_deferred_on_timeout(tmp_path: Path, monkeypatch) -> None:
     candidate, account, ledger = _setup_dispatch_one_repo(tmp_path, monkeypatch)
 
-    real_run = fd.subprocess.run
-
-    def fake_run(argv, *args, **kwargs):
-        if argv and argv[0] == "claude":
-            raise subprocess.TimeoutExpired(cmd=argv, timeout=kwargs.get("timeout", 0))
-        return real_run(argv, *args, **kwargs)
+    def fake_run(argv, **kwargs):
+        if argv[0] == "mycoder":
+            raise subprocess.TimeoutExpired(argv, kwargs.get("timeout", 0))
+        return _REAL_SUBPROCESS_RUN(argv, **kwargs)
 
     monkeypatch.setattr(fd.subprocess, "run", fake_run)
 
     fd._dispatch_one(
-        account, candidate, execute=True, max_budget_usd=1.5, max_turns=7,
-        ledger=ledger, org="MyThingsLab", session_timeout_s=42.0,
+        account, candidate, execute=True, max_budget_usd=1.0, max_turns=10, ledger=ledger,
+        org="MyThingsLab", session_timeout_s=5.0,
     )
 
-    entries = [e for e in ledger if e.kind == "dispatch" and e.outcome != "started"]
-    assert len(entries) == 1
-    assert entries[0].outcome == "deferred"
-    assert "42s" in entries[0].detail
-    assert "timeout" in entries[0].detail.lower()
+    (entry,) = [e for e in ledger.read() if e.kind == "dispatch" and e.outcome != "started"]
+    assert entry.outcome == "deferred"
+    assert "wall-clock timeout" in entry.detail
+
+
+def test_dispatch_one_treats_unparseable_mycoder_output_as_failed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    candidate, account, ledger = _setup_dispatch_one_repo(tmp_path, monkeypatch)
+
+    def fake_run(argv, **kwargs):
+        if argv[0] == "mycoder":
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="mycoder: command not found")
+        return _REAL_SUBPROCESS_RUN(argv, **kwargs)
+
+    monkeypatch.setattr(fd.subprocess, "run", fake_run)
+
+    fd._dispatch_one(
+        account, candidate, execute=True, max_budget_usd=1.0, max_turns=10, ledger=ledger,
+        org="MyThingsLab",
+    )
+
+    (entry,) = [e for e in ledger.read() if e.kind == "dispatch" and e.outcome != "started"]
+    assert entry.outcome == "failed"
+
+
+def test_dispatch_one_records_minimal_usage_entry(tmp_path: Path, monkeypatch) -> None:
+    candidate, account, ledger = _setup_dispatch_one_repo(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        fd.subprocess, "run",
+        _fake_mycoder_run(outcome="no_changes", detail="nothing to do", cost_usd=0.42),
+    )
+
+    fd._dispatch_one(
+        account, candidate, execute=True, max_budget_usd=1.0, max_turns=10, ledger=ledger,
+        org="MyThingsLab",
+    )
+
+    (usage,) = [e for e in ledger.read() if e.kind == "usage"]
+    assert usage.data["cost_usd"] == 0.42
+

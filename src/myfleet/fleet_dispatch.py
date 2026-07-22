@@ -2,10 +2,13 @@
 """Fan out ready fleet work across multiple Claude Code accounts.
 
 Reuses myorchestrator's ranking (myorchestrator next --count N) to pick one
-distinct candidate per available worker, then runs each in its own git
-worktree (mythings.isolation.Workspace) with a headless `claude -p` session
-under a different CLAUDE_CONFIG_DIR — so two subscriptions can work the fleet
-concurrently without touching each other's files.
+distinct candidate per available worker, then runs each as a `mycoder build`
+call under a different CLAUDE_CONFIG_DIR — so two subscriptions can work the
+fleet concurrently without touching each other's files. my-coder owns the
+worker role end to end (its own Workspace worktree, branch naming/resume,
+prompt, the single push + draft-PR side effect); this module picks which
+candidate to run and translates the result into the resume/recover outcomes
+below.
 
 Only "issue" candidates are dispatchable today; "scaffold" candidates (a
 not-yet-built tool) need MyScaffolder, which doesn't exist yet, so they're
@@ -20,7 +23,7 @@ there and the issue is paused (not failed) until the blocker closes; after
 MAX_ATTEMPTS unresolved tries it's handed to a human.
 
 Each run ends at "draft PR opened", promoted to ready-for-review only once its
-checklist body and CI both check out — never pushes to main, never merges.
+tests-passed signal and CI both check out — never pushes to main, never merges.
 Defaults to --dry-run; pass --execute to actually spawn the headless sessions.
 
 Kill switch: `--abort` touches a HALT marker (.fleet-dispatch/HALT) and exits;
@@ -38,10 +41,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
 import subprocess
 import sys
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -51,18 +52,14 @@ from pathlib import Path
 from myorchestrator.candidates import Candidate
 from myorchestrator.manifest import default_manifest_path
 from myorchestrator.orchestrator import Orchestrator, Recommendation
-from mythings import _secrets
 from mythings.github import app_installation_org, github_app_token
-from mythings.isolation import Workspace
 from mythings.ledger import Ledger
 
 import myfleet.fleet_ask as fleet_ask
-from myfleet.fleet_usage import SAFE_FAMILY_PATTERNS, UsageReport, family_for, parse_transcript
 
 # Climbs myfleet/<file>.py -> src -> my-fleet -> MyThingsLab/ (the fleet root).
 WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
 DISPATCH_LEDGER = WORKSPACE_ROOT / ".fleet-dispatch" / "ledger.jsonl"
-ALLOWED_TOOLS_PATH = WORKSPACE_ROOT / ".fleet-dispatch" / "allowed_tools.json"
 TRANSCRIPTS_DIR = WORKSPACE_ROOT / ".fleet-dispatch" / "transcripts"
 # The kill switch: a marker file, not a signal or a flag a running process has
 # to poll mid-loop. `--execute` checks for it before launching anything and
@@ -79,96 +76,8 @@ HALT_MARKER = WORKSPACE_ROOT / ".fleet-dispatch" / "HALT"
 # ceiling should pass --max-daily-usd instead.
 DAILY_CAP_OVERRIDE = WORKSPACE_ROOT / ".fleet-dispatch" / "daily-cap-override.json"
 
-# Guards the read-modify-write of allowed_tools.json and its commit in
-# WORKSPACE_ROOT: concurrent dispatches now run in parallel threads, and two
-# threads self-widening the allowlist at once would race on the file and on
-# `git commit` (a second commit while one is mid-flight fails on index.lock).
-_ALLOWLIST_LOCK = threading.Lock()
-
-DEFAULT_ALLOWED_TOOLS = [
-    "Read",
-    "Edit",
-    "Write",
-    "Bash(git *)",
-    "Bash(pytest*)",
-    "Bash(python -m pytest*)",
-    "Bash(python3 -m pytest*)",
-    "Bash(ruff*)",
-    "Bash(python -m ruff*)",
-    "Bash(python3 -m ruff*)",
-    # Read-only inspection: workers reach for these to look around even though
-    # they have native Read/Glob/Grep tools; allowing the non-mutating ones up
-    # front stops a run from dead-ending on a denied `ls`/`grep` (see the
-    # SAFE_FAMILY_PATTERNS note in fleet_usage.py). `rm`/`pip`/`python -c` are
-    # intentionally absent — those can mutate or run code and stay friction.
-    # `find` also stays off this list even bare/unprefixed: allowedTools is a
-    # command-prefix match, and there is no prefix of `find . -name X -delete`
-    # (or `-exec ...`) that both matches real read-only usage and excludes the
-    # mutating one, so it stays friction like `rm`.
-    "Bash(ls*)",
-    "Bash(cat*)",
-    "Bash(head*)",
-    "Bash(tail*)",
-    "Bash(wc*)",
-    "Bash(grep*)",
-    "Bash(pwd*)",
-    "Bash(printenv*)",
-    "Bash(env)",
-    # Setup a worker routinely needs before it can run a repo's own tests: a
-    # local venv. `pip install` still isn't on this list, so the worker has to
-    # rely on the repo's checked-in dependencies once the venv exists.
-    "Bash(python3 -m venv*)",
-    "Bash(gh issue view*)",
-    "Bash(gh pr create*)",
-    # Filing a blocker issue in another tool's repo when this one can't proceed
-    # is a first-class move in the resume/recover loop (see _prompt_for's blocker
-    # protocol), so the worker needs to create issues, not just view them.
-    "Bash(gh issue create*)",
-]
-
-# Passed to every worker as `--disallowedTools` so a headless session never
-# burns tokens reading (or wanders into) generated / vendored / provenance dirs
-# that are irrelevant to closing a code issue. This is the real, supported
-# stand-in for a ".claudeignore": Claude Code has no such file, but a Read()
-# deny glob is exactly the "don't read what's useless" lever. The worker is
-# already filesystem-isolated to one repo's worktree (see Workspace below), so
-# these globs only need to hide noise *within* that repo. Deny Edit too: none of
-# these are files a worker should be rewriting to close an issue.
-DEFAULT_DENY_READS = [
-    "Read(**/.venv/**)",
-    "Read(**/__pycache__/**)",
-    "Read(**/*.pyc)",
-    "Read(**/.ruff_cache/**)",
-    "Read(**/.pytest_cache/**)",
-    "Read(**/.git/**)",
-    "Read(**/node_modules/**)",
-    "Read(**/dev-ledger/**)",
-    "Edit(**/.venv/**)",
-    "Edit(**/dev-ledger/**)",
-]
-
-
 def _utc_ts() -> str:
     return datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-
-
-def _redact_secrets(text: str) -> tuple[str, list[str]]:
-    # A worker transcript is persisted verbatim and its final_message lands in
-    # the ledger -- if a session ever echoes a credential (printenv, a leaked
-    # token in a fetched page), both records would hold it forever in a public
-    # repo's working tree. Redact anything credential-shaped before either is
-    # written. Redaction over rejection: the transcript's forensic value is
-    # the whole reason it exists, so keep the file and remove only the spans.
-    # scan_text detects; substitution reuses the same pattern table so the
-    # full match is removed, not scan_text's 40-char snippet prefix. A false
-    # positive (a test fixture that looks like a key) costs a few obscured
-    # characters in a forensic record -- the right side of that trade.
-    findings = _secrets.scan_text(text)
-    if not findings:
-        return text, []
-    for name, pattern in _secrets._PATTERNS.items():
-        text = pattern.sub(f"[REDACTED-{name}]", text)
-    return text, sorted({f.pattern for f in findings})
 
 
 def _today_spend_usd(ledger: Ledger, *, today: str | None = None) -> float:
@@ -212,56 +121,6 @@ def _spend_alert_sent_today(ledger: Ledger, *, today: str | None = None) -> bool
     )
 
 
-def _load_allowed_tools() -> list[str]:
-    if ALLOWED_TOOLS_PATH.exists():
-        return json.loads(ALLOWED_TOOLS_PATH.read_text())
-    ALLOWED_TOOLS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    ALLOWED_TOOLS_PATH.write_text(json.dumps(DEFAULT_ALLOWED_TOOLS, indent=2))
-    return list(DEFAULT_ALLOWED_TOOLS)
-
-
-def _with_rtk_allowlist(tools: list[str]) -> list[str]:
-    # rtk's hook rewrites `git status` -> `rtk git status` (it prepends `rtk `).
-    # Verified against rtk 0.43.0: its PreToolUse hook returns `updatedInput`
-    # only -- NO `permissionDecision: allow` -- so the rewritten command is NOT
-    # self-allowed and must independently satisfy the worker's --allowedTools, or
-    # a headless worker stalls on a denied command. The denial auto-widen in
-    # _record_usage can't recover it either (it would re-add `Bash(git *)`, not
-    # the `rtk`-prefixed form). Mirror each Bash(X) entry with Bash(rtk X) so the
-    # compact form is allowed exactly where the original was, never broader.
-    mirrored = list(tools)
-    for t in tools:
-        if t.startswith("Bash(") and t.endswith(")"):
-            inner = t[len("Bash(") : -1]
-            mirrored.append(f"Bash(rtk {inner})")
-    return mirrored
-
-
-def _save_allowed_tools(tools: list[str], *, commit_message: str) -> None:
-    ALLOWED_TOOLS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    ALLOWED_TOOLS_PATH.write_text(json.dumps(tools, indent=2))
-    # The commit itself *is* the audit trail for a self-edit -- git history
-    # replaces the pre-git backup-copy approach, and `git revert` is the way
-    # back out if a widened pattern turns out to be wrong. The ledger entry
-    # that explains *why* rides along in the same commit.
-    #
-    # Commit with an explicit pathspec, NOT a bare `git commit`: WORKSPACE_ROOT
-    # is a live checkout that may have unrelated staged changes, and a bare
-    # commit would sweep them into this self-edit. The pathspec form commits a
-    # snapshot of exactly these two files and leaves anything else staged alone.
-    subprocess.run(
-        ["git", "-C", str(WORKSPACE_ROOT), "add", str(ALLOWED_TOOLS_PATH), str(DISPATCH_LEDGER)],
-        check=True,
-    )
-    subprocess.run(
-        [
-            "git", "-C", str(WORKSPACE_ROOT), "commit", "-m", commit_message,
-            "--", str(ALLOWED_TOOLS_PATH), str(DISPATCH_LEDGER),
-        ],
-        check=True,
-    )
-
-
 @dataclass(frozen=True)
 class Account:
     name: str
@@ -276,42 +135,6 @@ def _parse_accounts(raw: str) -> list[Account]:
             continue
         accounts.append(Account(name=f"account{i + 1}", config_dir=Path(entry).expanduser()))
     return accounts
-
-
-def _config_dir_has_rtk_hook(config_dir: Path) -> bool:
-    # rtk installs itself with `rtk init -g` into a CLAUDE_CONFIG_DIR: it writes
-    # a PreToolUse hook to settings.json that rewrites commands to their compact
-    # `rtk` equivalents. We never write that hook ourselves — rtk owns it, and
-    # its schema is versioned — we only read settings.json to confirm a worker
-    # spawned under this dir will actually inherit the compression. The hook is
-    # self-guarding (exits 0 if rtk/jq is missing), so this check is about
-    # "compression is wired", not safety.
-    settings = config_dir / "settings.json"
-    if not settings.is_file():
-        return False
-    try:
-        data = json.loads(settings.read_text())
-    except (json.JSONDecodeError, OSError):
-        return False
-    hooks = data.get("hooks", {}).get("PreToolUse", [])
-    return "rtk" in json.dumps(hooks)
-
-
-def _preflight_rtk(accounts: list[Account]) -> list[str]:
-    # Read-only. Returns human-readable problems; an empty list means rtk
-    # compression is correctly wired for every account. Refusing to --execute
-    # on a non-empty result is the point: a paid run must never silently skip
-    # the compression you asked for.
-    problems = []
-    if shutil.which("rtk") is None:
-        problems.append("`rtk` is not on PATH — install it and run `rtk init -g --hook-only`")
-    for account in accounts:
-        if not _config_dir_has_rtk_hook(account.config_dir):
-            problems.append(
-                f"{account.name} ({account.config_dir}) has no rtk PreToolUse hook — "
-                f"run `CLAUDE_CONFIG_DIR={account.config_dir} rtk init -g --hook-only`"
-            )
-    return problems
 
 
 def _account_uuid(config_dir: Path) -> str | None:
@@ -353,148 +176,14 @@ def _preflight_distinct_accounts(accounts: list[Account]) -> list[str]:
     return problems
 
 
-def _prompt_for(
-    candidate: Candidate, prior: Attempt | None = None, *, has_branch: bool = False
-) -> str:
-    repo, number = candidate.id.split("#")
-
-    resume_block = ""
-    if prior is not None:
-        # Whether the prior attempt left committed work is decided by an actual
-        # pushed branch, not by its outcome name -- a "failed" run that stalled
-        # before its first commit (e.g. a session/rate limit) leaves nothing, so
-        # promising a branch that isn't there would just confuse the worker.
-        resume_block = (
-            f"THIS IS A RESUMED ATTEMPT (#{prior.attempt_number + 1}). A previous "
-            f"attempt on this issue ended '{prior.outcome}'"
-            + (
-                ", and you are already checked out on the branch it left behind.\n"
-                if has_branch
-                else " without leaving any committed work; you are starting from main.\n"
-            )
-            + (
-                f"Its parting message was: {prior.final_message[:400]!r}\n"
-                if prior.final_message
-                else ""
-            )
-            + "Do NOT start over. First run `git log --oneline main..HEAD` and "
-            "`git diff main...HEAD` to see exactly what the prior attempt already "
-            "did and where it got stuck, then continue from there — fix what broke "
-            "and finish the issue.\n\n"
-        )
-
-    blocker_block = (
-        "If this issue turns out to be blocked by a missing capability in ANOTHER "
-        "MyThingsLab repo (a contract, helper, or fix that repo must land first), "
-        "do not thrash against it. Use `gh issue create --repo MyThingsLab/<repo>` "
-        "to file a precise issue describing exactly what that repo must add and "
-        "why, then END your run by printing one final line, exactly:\n"
-        "  FLEET-DISPATCH-BLOCKED: MyThingsLab/<repo>#<number>\n"
-        "naming the issue you just filed. That records the dependency so this issue "
-        "is paused, not failed, until the blocker is resolved.\n\n"
-    )
-
-    critical_block = (
-        "If while working you discover a SEPARATE bug that is a security issue "
-        "or breaks a core invariant shared across the fleet (a `my-things-core` "
-        "contract, the build harness, or anything that would let other tools "
-        "ship broken work on top of it), file it immediately with "
-        "`gh issue create --label critical --label bug --repo MyThingsLab/<repo>` "
-        "describing exactly what's broken and its blast radius. That label halts "
-        "new fleet dispatch org-wide until it's closed -- do not wait until you "
-        f"finish this task to file it. Filing it does not abort your own work; "
-        f"keep going on issue #{number} unless the critical bug blocks it "
-        "directly, in which case treat it as a blocker per the paragraph above.\n\n"
-    )
-
-    return (
-        resume_block
-        + f"Work issue #{number} in the {repo} repo (`gh issue view {number} --repo "
-        f"MyThingsLab/{repo}` for the full description; title: {candidate.title!r}).\n\n"
-        f"You are running fully non-interactively, as a headless `claude -p` "
-        f"session: no human is watching and no one can approve a permission "
-        f"prompt. If a command is denied, do NOT ask for approval or wait for it — "
-        f"it will never come. Work only with the tools you already have, and prefer "
-        f"your Read, Edit, Write, Glob and Grep tools over shelling out to `ls`, "
-        f"`cat`, `find` or `grep` to inspect the repo.\n\n"
-        + blocker_block
-        + critical_block
-        + "Follow this repo's own CLAUDE.md and HARNESS.md exactly. Make the smallest "
-        "change that closes the issue, with tests. Do not read or edit generated / "
-        "vendored / provenance paths — .venv, __pycache__, .ruff_cache, "
-        ".pytest_cache, node_modules, dev-ledger — reads there are blocked and add "
-        "nothing. Stay inside this repo; do not touch any other repo in the "
-        "workspace.\n\n"
-        "Run the repo's full test suite AND its linter, and confirm both pass, "
-        "before you finish. Commit your work, then open the pull request as a DRAFT "
-        "with `gh pr create --draft`. The PR body MUST contain, verbatim, a line "
-        f"`Closes #{number}` and this readiness checklist with every box you have "
-        "actually satisfied checked:\n"
-        "- [ ] pytest passes\n"
-        "- [ ] ruff clean\n"
-        "- [ ] change scoped to this repo only\n"
-        "Leave the PR as a draft — do NOT mark it ready for review, do NOT push to "
-        "main, and do NOT merge it yourself. A separate gate promotes it to ready "
-        "once CI is green."
-    )
-
-
-def _dispatch_outcome(n_commits: int, pr_number: int | None) -> tuple[str, str]:
-    # Translates what actually landed into an honest ledger outcome. A headless
-    # worker exiting 0 is NOT proof it did the work -- it may have given up (e.g.
-    # asked for a permission approval no one was there to grant). "success"
-    # requires a real commit AND an open PR; anything less says so plainly.
-    if n_commits == 0:
-        return "no_changes", "worker committed nothing; branch left unpushed"
-    if pr_number is None:
-        return "needs_review", "committed but no PR was opened; branch pushed for review"
-    return "success", f"opened PR #{pr_number}"
-
-
-def _open_pr_number(org: str, repo: str, branch: str) -> int | None:
-    result = subprocess.run(
-        [
-            "gh", "pr", "list", "--repo", f"{org}/{repo}", "--head", branch,
-            "--state", "open", "--json", "number", "--jq", ".[0].number // empty",
-        ],
-        capture_output=True,
-        text=True,
-    )
-    out = result.stdout.strip()
-    return int(out) if out.isdigit() else None
-
-
-def _branch_name(candidate: Candidate) -> str:
-    return f"fleet-dispatch/{candidate.id.replace('#', '-')}"
-
 
 # --- PR merge-readiness gate -----------------------------------------------
 #
-# A pushed draft PR is promoted to "ready for review" only when it honours the
-# checklist contract from _prompt_for AND its CI actually goes green. Everything
-# short of that stays a draft and reports "needs_review" (a resumable outcome),
-# so "success" always means a human can pick the PR up to merge. Never merges --
+# A pushed draft PR is promoted to "ready for review" only when my-coder itself
+# reported tests passing AND its CI actually goes green. Everything short of
+# that stays a draft and reports "needs_review" (a resumable outcome), so
+# "success" always means a human can pick the PR up to merge. Never merges --
 # the human always does that.
-
-
-def _pr_body(org: str, repo: str, number: int) -> str:
-    result = subprocess.run(
-        ["gh", "pr", "view", str(number), "--repo", f"{org}/{repo}", "--json", "body", "--jq", ".body"],
-        capture_output=True, text=True,
-    )
-    return result.stdout.strip()
-
-
-def _pr_body_ok(body: str, issue_number: str) -> tuple[bool, str]:
-    # Enforced-checklist half of readiness: the PR must reference the issue it
-    # closes and carry a checklist with at least one box the worker actually
-    # ticked. A body that skips it means the worker didn't follow the contract.
-    low = body.lower()
-    if f"closes #{issue_number}" not in low:
-        return False, f"body is missing 'Closes #{issue_number}'"
-    if "- [x]" not in low:
-        return False, "body is missing a checked readiness checklist"
-    return True, ""
 
 
 def _checks_state(org: str, repo: str, number: int) -> str:
@@ -558,15 +247,17 @@ def _promote_pr(org: str, repo: str, number: int) -> None:
 
 
 def _finalize_pr(
-    org: str, repo: str, issue_number: str, pr_number: int, *, ready_timeout: float
+    org: str, repo: str, pr_number: int, *, tests_passed: bool | None, ready_timeout: float
 ) -> tuple[str, str]:
     # Maps a freshly-pushed draft PR onto the existing outcome vocabulary so the
-    # resume/recover router still understands it: "success" ONLY when the body
-    # holds AND CI goes green (then it's promoted out of draft); otherwise
-    # "needs_review", which is resumable and leaves the draft for a human.
-    body_ok, why = _pr_body_ok(_pr_body(org, repo, pr_number), issue_number)
-    if not body_ok:
-        return "needs_review", f"PR #{pr_number} left draft (not merge-ready): {why}"
+    # resume/recover router still understands it: "success" ONLY when my-coder
+    # itself reported tests passing AND CI goes green (then it's promoted out of
+    # draft); otherwise "needs_review", which is resumable and leaves the draft
+    # for a human. Trusts my-coder's own structured tests_passed signal instead
+    # of re-parsing the PR body for a checked box -- a real measurement, not
+    # prose a session could get wrong without anyone noticing.
+    if not tests_passed:
+        return "needs_review", f"PR #{pr_number} left draft: my-coder did not report tests passing"
     state = _wait_for_checks(org, repo, pr_number, timeout=ready_timeout)
     if state == "pass":
         _promote_pr(org, repo, pr_number)
@@ -588,12 +279,22 @@ def _finalize_pr(
 # blocker as an issue there and pause this one instead of thrashing.
 
 MAX_ATTEMPTS = 3
-# The worker signals "I filed a blocker issue in another repo; pause this issue
-# rather than count it a failure" by printing a final line of exactly this form.
-# Agent-owned judgment, machine-readable handoff.
-_BLOCKED_SENTINEL = "FLEET-DISPATCH-BLOCKED:"
 _TERMINAL_OUTCOMES = frozenset(
-    {"success", "needs_review", "no_changes", "failed", "blocked", "needs_human", "deferred"}
+    {
+        "success",
+        "needs_review",
+        "no_changes",
+        "failed",
+        "blocked",
+        "needs_human",
+        "deferred",
+        # my-coder's own vocabulary: "denied" (its Policy gate blocked the PR --
+        # unreachable today since fleet_dispatch doesn't pass --guarded, but
+        # recorded honestly if that ever changes) and "skipped" (the picked
+        # issue no longer exists, e.g. already closed by someone else).
+        "denied",
+        "skipped",
+    }
 )
 _RESUMABLE_OUTCOMES = frozenset({"needs_review", "no_changes", "failed", "deferred"})
 # Outcomes that count toward MAX_ATTEMPTS. "deferred" (a transient
@@ -627,15 +328,6 @@ class Attempt:
     attempt_number: int  # count of terminal attempts so far, this one included
     final_message: str = ""
     blocker: str | None = None  # "<org>/<repo>#<n>" when outcome == "blocked"
-
-
-def _parse_blocker(final_message: str) -> str | None:
-    for line in final_message.splitlines():
-        line = line.strip()
-        if line.startswith(_BLOCKED_SENTINEL):
-            ref = line[len(_BLOCKED_SENTINEL) :].strip()
-            return ref or None
-    return None
 
 
 def _last_attempt(ledger: Ledger, candidate_id: str) -> Attempt | None:
@@ -682,7 +374,10 @@ def _dispatch_decision(
     # "skip:needs_human".
     if attempt is None:
         return "fresh"
-    if attempt.outcome == "success":
+    if attempt.outcome in ("success", "denied", "skipped"):
+        # All three are considered stopping points, not transient misses:
+        # denied re-hits the same policy wall every time, and a skipped issue
+        # (already closed elsewhere) has nothing left to do.
         return "skip:done"
     if attempt.outcome == "needs_human":
         return "skip:needs_human"
@@ -711,23 +406,16 @@ def _issue_is_open(ref: str) -> bool:
     return result.stdout.strip().upper() == "OPEN"
 
 
-def _remote_branch_exists(repo_path: Path, branch: str) -> bool:
-    result = subprocess.run(
-        ["git", "-C", str(repo_path), "ls-remote", "--exit-code", "--heads", "origin", branch],
-        capture_output=True,
-        text=True,
-    )
-    return result.returncode == 0
-
-
 def _fresh_base_ref(repo_path: Path) -> str:
-    # A fresh dispatch must base on origin's main, not the local checkout's:
-    # Workspace cuts the worktree from a LOCAL ref, and nothing keeps the
-    # sibling checkouts current between human syncs -- a worker cut from a
-    # stale main re-solves already-merged work and collides on push. A repo
-    # with no reachable origin (offline, or a bare test repo) falls back to
-    # the local main with a note rather than refusing outright: if the
-    # network is really gone the run fails honestly at push time anyway.
+    # my-coder resolves its own fresh-run base ref as "origin/{base}" but never
+    # fetches first -- nothing keeps these sibling checkouts current between
+    # human syncs, so a stale local origin/main would make it build atop
+    # already-superseded code. Called for this fetch side effect before every
+    # `mycoder build` invocation; the returned ref is informational (my-coder
+    # decides its own base internally). A repo with no reachable origin
+    # (offline, or a bare test repo) falls back to the local main with a note
+    # rather than refusing outright: if the network is really gone the run
+    # fails honestly inside mycoder at push time anyway.
     fetch = subprocess.run(
         ["git", "-C", str(repo_path), "fetch", "origin", "main"],
         capture_output=True,
@@ -742,82 +430,25 @@ def _fresh_base_ref(repo_path: Path) -> str:
     return "main"
 
 
-def _record_usage(
-    report: UsageReport, *, account: Account, candidate: Candidate, transcript_path: Path,
-    ledger: Ledger, rtk: bool = False,
-) -> None:
-    ledger.record(
-        tool="fleet_dispatch",
-        kind="usage",
-        outcome="success",
-        detail=f"{account.name} -> {candidate.id}: ${report.cost_usd:.4f}, "
-        f"{report.num_turns} turns, {len(report.denials)} denials",
-        candidate=candidate.id,
-        account=account.name,
-        cost_usd=report.cost_usd,
-        input_tokens=report.input_tokens,
-        output_tokens=report.output_tokens,
-        cache_creation_input_tokens=report.cache_creation_input_tokens,
-        cache_read_input_tokens=report.cache_read_input_tokens,
-        num_turns=report.num_turns,
-        wasted_output_tokens=report.wasted_output_tokens,
-        denials_count=len(report.denials),
-        transcript_path=str(transcript_path),
-        # Marks whether rtk output compression was active for this run, so
-        # rtk-on vs rtk-off `kind=usage` entries can be diffed after the fact --
-        # the "measure it, don't assume it" half of the rtk integration.
-        rtk=rtk,
-    )
-    if report.denials:
-        print(
-            f"  [{account.name}] {len(report.denials)} permission denial(s), "
-            f"~{report.wasted_output_tokens} output tokens wasted"
-        )
+def _mycoder_branch(candidate: Candidate) -> str:
+    # Mirrors my-coder's own naming (Coder._attempt: f"{TOOL}/{self._repo_name()}
+    # -{issue.number}"), so the "already has an open PR in flight" dedup check
+    # and the console/ledger output can find the branch my-coder actually cuts.
+    repo, number = candidate.id.split("#")
+    return f"mycoder/{repo}-{number}"
 
-    with _ALLOWLIST_LOCK:
-        tools = _load_allowed_tools()
-        all_added: list[str] = []
-        for d in report.denials:
-            family = family_for(d.command) if d.tool_name == "Bash" else None
-            if family is None:
-                ledger.record(
-                    tool="fleet_dispatch",
-                    kind="friction",
-                    outcome="needs_review",
-                    detail=f"unrecognized denied command, no auto-widen: {d.command!r}",
-                    candidate=candidate.id,
-                    turn=d.turn,
-                    preceding_reasoning=d.preceding_reasoning,
-                )
-                print(f"  [{account.name}] friction (needs human review): {d.command!r}")
-                continue
-            missing = [p for p in SAFE_FAMILY_PATTERNS[family] if p not in tools]
-            if missing:
-                tools.extend(missing)
-                all_added.extend(missing)
-                ledger.record(
-                    tool="fleet_dispatch",
-                    kind="self_edit",
-                    outcome="widened_allowlist",
-                    detail=f"auto-widened '{family}' family after a denial: added {missing}",
-                    candidate=candidate.id,
-                    added=missing,
-                    triggering_command=d.command,
-                    turn=d.turn,
-                    preceding_reasoning=d.preceding_reasoning,
-                )
-                print(f"  [{account.name}] self-widened allowlist ({family}): +{missing}")
-        if all_added:
-            _save_allowed_tools(
-                tools,
-                commit_message=(
-                    f"fleet_dispatch: auto-widen allowlist after {candidate.id} denials\n\n"
-                    f"Added: {all_added}\n"
-                    f"Triggered by {len(report.denials)} permission denial(s) dispatching "
-                    f"{account.name} -> {candidate.id}. See .fleet-dispatch/ledger.jsonl "
-                    f"(kind=self_edit) for the reasoning behind each addition."
-                ),
-            )
+
+def _open_pr_number(org: str, repo: str, branch: str) -> int | None:
+    result = subprocess.run(
+        [
+            "gh", "pr", "list", "--repo", f"{org}/{repo}", "--head", branch,
+            "--state", "open", "--json", "number", "--jq", ".[0].number // empty",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    out = result.stdout.strip()
+    return int(out) if out.isdigit() else None
 
 
 def _dispatch_one(
@@ -830,34 +461,24 @@ def _dispatch_one(
     ledger: Ledger,
     org: str,
     prior: Attempt | None = None,
-    rtk: bool = False,
     ready_timeout: float = 0.0,
     session_timeout_s: float = 1800.0,
 ) -> None:
     repo, number = candidate.id.split("#")
     repo_path = WORKSPACE_ROOT / repo
-    branch = _branch_name(candidate)
+    branch = _mycoder_branch(candidate)
     attempt_number = (prior.attempt_number + 1) if prior is not None else 1
-
-    # Resume from the prior attempt's pushed branch when one exists, so the
-    # worker continues that work instead of restarting from main. If the prior
-    # attempt left nothing durable (no_changes/transient failure never pushed),
-    # fall back to main but still carry its context in the prompt.
-    resuming_branch = prior is not None and _remote_branch_exists(repo_path, branch)
-    base_ref = f"origin/{branch}" if resuming_branch else "origin/main"
-    prompt = _prompt_for(candidate, prior, has_branch=resuming_branch)
-
     mode = "fresh" if prior is None else f"resume#{attempt_number} from {prior.outcome}"
+
     # One print call, not several: with dispatches now running concurrently in
     # separate threads, individual print()s from different accounts could
     # otherwise interleave mid-block and produce unreadable output.
     print(
         f"\n=== {account.name} -> {candidate.id} ({repo}) [{mode}] ===\n"
-        f"  branch: {branch} (base {base_ref})\n"
+        f"  branch: {branch}\n"
         f"  config: {account.config_dir}\n"
         f"  budget cap: ${max_budget_usd}, turn cap: {max_turns}, "
-        f"session timeout: {session_timeout_s:.0f}s\n"
-        f"  prompt: {prompt}"
+        f"session timeout: {session_timeout_s:.0f}s"
     )
 
     if not execute:
@@ -875,201 +496,123 @@ def _dispatch_one(
         attempt=attempt_number,
     )
 
-    allowed_tools = _load_allowed_tools()
-    if rtk:
-        allowed_tools = _with_rtk_allowlist(allowed_tools)
-
-    if resuming_branch:
-        # Fetch main alongside the branch: the merge-base below measures the
-        # branch's own commits against origin's mainline, and a stale local
-        # main would count already-merged commits as the worker's.
-        subprocess.run(
-            ["git", "-C", str(repo_path), "fetch", "origin", "main", branch], check=True
+    # my-coder owns the whole worker role now: its own Workspace worktree,
+    # branch naming/resume, prompt (searcher/researcher context, the blocker/
+    # critical-bug protocol), running the target repo's tests, and the single
+    # push + draft-PR side effect. This just picks which candidate to run and
+    # translates the result into the outcome vocabulary _dispatch_decision
+    # already knows.
+    _fresh_base_ref(repo_path)  # best-effort fetch; see its docstring
+    TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
+    env = {**os.environ, "CLAUDE_CONFIG_DIR": str(account.config_dir)}
+    argv = [
+        "mycoder", "build",
+        "--repo", f"{org}/{repo}",
+        "--issue", number,
+        "--source", str(repo_path),
+        "--session-runner", "claude",
+        "--max-budget-usd", str(max_budget_usd),
+        "--max-turns", str(max_turns),
+        "--session-timeout-s", str(session_timeout_s),
+        "--run-tests",
+        "--transcripts-dir", str(TRANSCRIPTS_DIR),
+        "--json",
+    ]
+    # A backstop above my-coder's own internal session timeout: git/test
+    # overhead around the session itself isn't bounded by --session-timeout-s,
+    # so this catches a genuinely stuck `mycoder build` process rather than
+    # blocking the thread forever. Routed to "deferred" below, same as any
+    # other transient infrastructure hiccup.
+    timed_out = False
+    try:
+        proc = subprocess.run(
+            argv, env=env, capture_output=True, text=True, timeout=session_timeout_s + 300,
         )
-        mainline = "origin/main"
-    else:
-        base_ref = mainline = _fresh_base_ref(repo_path)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        proc = subprocess.CompletedProcess(args=argv, returncode=1, stdout="", stderr="")
 
-    with Workspace(repo_path, base_ref=base_ref) as tree:
-        # -B, not -b: reset the local branch ref to this worktree's HEAD (the
-        # prior branch tip when resuming, else main). A leftover local ref from a
-        # prior run's now-removed worktree would otherwise make `checkout -b`
-        # crash; any branch with an open PR was already skipped in main().
-        subprocess.run(["git", "-C", str(tree), "checkout", "-B", branch], check=True)
-        # Snapshot the branch point now, so "did the worker commit anything?" is
-        # measured against where it started -- not the `main` ref, which another
-        # concurrent dispatch could advance underneath us.
-        base_sha = subprocess.run(
-            ["git", "-C", str(tree), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-        env = {**os.environ, "CLAUDE_CONFIG_DIR": str(account.config_dir)}
-        # --max-budget-usd/--max-turns bound the session's spend and turn count,
-        # but neither bounds wall-clock time: a single stalled turn (network
-        # hang, or the exact "no one can approve a denied command" stall the
-        # prompt warns the worker about) would otherwise block this thread
-        # forever with no backstop. `timeout=` is that backstop; a timeout is an
-        # infrastructure hiccup, not evidence the issue itself is broken, so it
-        # is routed to "deferred" below rather than counted as a real failure.
-        timed_out = False
+    data: dict = {}
+    if proc.stdout.strip():
         try:
-            result = subprocess.run(
-                [
-                    "claude",
-                    "-p",
-                    prompt,
-                    "--output-format",
-                    "stream-json",
-                    "--verbose",
-                    "--max-budget-usd",
-                    str(max_budget_usd),
-                    "--max-turns",
-                    str(max_turns),
-                    "--disallowedTools",
-                    *DEFAULT_DENY_READS,
-                    "--allowedTools",
-                    *allowed_tools,
-                ],
-                cwd=tree,
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=session_timeout_s,
-            )
-        except subprocess.TimeoutExpired as exc:
-            timed_out = True
-            # subprocess.run's TimeoutExpired carries whatever output the
-            # session had produced before it was killed -- keep it for the
-            # transcript/ledger instead of discarding it, same forensic value
-            # as a completed run's output.
-            result = subprocess.CompletedProcess(
-                args=["claude"], returncode=1, stdout=exc.stdout or "", stderr=exc.stderr or "",
-            )
+            data = json.loads(proc.stdout.strip().splitlines()[-1])
+        except (json.JSONDecodeError, IndexError):
+            data = {}
 
-        # Redact before anything derived from the session output is persisted:
-        # the transcript file, and (via parse_transcript below) the report's
-        # final_message / denial commands that _record_usage and the outcome
-        # entry write to the ledger.
-        clean_stdout, leaked = _redact_secrets(result.stdout)
-        if leaked:
-            print(
-                f"  [{account.name}] transcript contained credential-shaped text; "
-                f"redacted pattern(s): {', '.join(leaked)}"
-            )
-            ledger.record(
-                tool="fleet_dispatch",
-                kind="secret_alert",
-                outcome="redacted",
-                detail=f"{account.name} -> {candidate.id}: redacted credential-shaped "
-                f"text from the transcript before persisting it",
-                candidate=candidate.id,
-                account=account.name,
-                patterns=leaked,
-            )
+    mycoder_outcome = data.get("outcome")
+    detail = data.get("detail", "")
+    blocker = data.get("blocker")
+    pr_number = data.get("pr")
+    tests_passed = data.get("tests_passed")
+    cost_usd = float(data.get("cost_usd", 0.0))
+    files_touched = data.get("files_touched", [])
 
-        TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
-        transcript_path = TRANSCRIPTS_DIR / f"{branch.replace('/', '_')}-{_utc_ts()}.jsonl"
-        transcript_path.write_text(clean_stdout)
-        report = parse_transcript(clean_stdout.splitlines())
-        _record_usage(
-            report, account=account, candidate=candidate, transcript_path=transcript_path,
-            ledger=ledger, rtk=rtk,
+    # An explicit blocker signal and a wall-clock timeout both win over
+    # everything else -- distinct outcomes from a real failure. Then mycoder's
+    # own structured outcome, translated 1:1 except "failure" (its name) ->
+    # "failed" (fleet_dispatch's own ledger vocabulary, unchanged since before
+    # this swap) and a transient-message reclassification to "deferred" so a
+    # session/rate-limit blip never counts toward MAX_ATTEMPTS.
+    if timed_out:
+        outcome, msg = (
+            "deferred",
+            f"deferred (transient): mycoder exceeded {session_timeout_s + 300:.0f}s wall-clock timeout",
         )
-
-        # Count the branch's own commits via merge-base (robust to main
-        # advancing under a concurrent dispatch) to judge whether real work
-        # exists on the branch at all; count this run's additions separately so
-        # a resume that made no progress is visible.
-        merge_base = subprocess.run(
-            ["git", "-C", str(tree), "merge-base", mainline, "HEAD"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-        total_commits = int(
-            subprocess.run(
-                ["git", "-C", str(tree), "rev-list", "--count", f"{merge_base}..HEAD"],
-                capture_output=True, text=True, check=True,
-            ).stdout.strip()
-            or "0"
-        )
-        new_commits = int(
-            subprocess.run(
-                ["git", "-C", str(tree), "rev-list", "--count", f"{base_sha}..HEAD"],
-                capture_output=True, text=True, check=True,
-            ).stdout.strip()
-            or "0"
-        )
-
-        blocker = _parse_blocker(report.final_message)
-
-        # Durability is the whole point of the resume loop: push any real commits
-        # so a later attempt can pick them up, even when this run failed or only
-        # got partway. (No commits -> nothing to push, and no dead branch left.)
-        pushed = False
-        pr_number: int | None = None
-        if total_commits > 0:
-            push = subprocess.run(
-                ["git", "-C", str(tree), "push", "-u", "origin", branch],
-                capture_output=True, text=True,
-            )
-            pushed = push.returncode == 0
-            if not pushed:
-                print(f"  [{account.name}] push failed: {push.stderr.strip()}")
-
-        # An explicit blocker signal wins over everything else: the worker chose
-        # to pause on a cross-repo dependency, which is a distinct outcome from
-        # failing. Then a non-zero exit, then "committed nothing", then the
-        # commit+PR discrimination (success vs needs_review).
-        if blocker is not None:
-            outcome, msg = "blocked", f"paused on cross-repo blocker {blocker}"
-        elif timed_out:
-            outcome, msg = (
-                "deferred",
-                f"deferred (transient): session exceeded {session_timeout_s:.0f}s wall-clock timeout",
-            )
-        elif result.returncode != 0 and _is_transient_failure(report.final_message):
-            # Not the issue's fault -- a session/rate limit or transport blip. Keep
-            # it resumable but don't count it toward the human-escalation cap.
-            outcome, msg = "deferred", f"deferred (transient): claude exited {result.returncode}"
-        elif result.returncode != 0:
-            outcome, msg = "failed", f"claude exited {result.returncode}"
-        elif total_commits == 0:
-            outcome, msg = "no_changes", "worker committed nothing"
-        elif not pushed:
-            outcome, msg = "failed", "commits present but push failed"
+    elif mycoder_outcome is None:
+        # mycoder itself never returned a parseable result -- an infrastructure
+        # problem, not a real assessment of the issue.
+        tail = proc.stderr.strip()[-300:]
+        if _is_transient_failure(tail):
+            outcome, msg = "deferred", f"deferred (transient): mycoder exited {proc.returncode}"
         else:
-            pr_number = _open_pr_number(org, repo, branch)
-            if pr_number is None:
-                outcome, msg = _dispatch_outcome(total_commits, None)
-            else:
-                outcome, msg = _finalize_pr(
-                    org, repo, number, pr_number, ready_timeout=ready_timeout
-                )
+            outcome, msg = "failed", f"mycoder exited {proc.returncode}: {tail or 'no output'}"
+    elif mycoder_outcome == "blocked":
+        outcome, msg = "blocked", detail
+    elif mycoder_outcome == "failure":
+        outcome, msg = (
+            ("deferred", f"deferred (transient): {detail}")
+            if _is_transient_failure(detail)
+            else ("failed", detail)
+        )
+    elif mycoder_outcome == "success":
+        # A draft PR is open; the readiness gate decides whether it's promoted.
+        outcome, msg = _finalize_pr(
+            org, repo, pr_number, tests_passed=tests_passed, ready_timeout=ready_timeout
+        )
+    else:
+        # needs_review / no_changes / denied / skipped pass through unchanged.
+        outcome, msg = mycoder_outcome, detail
 
-        note = (
-            f" (worker's last words: {report.final_message[:160]!r})"
-            if report.final_message and outcome in {"no_changes", "failed", "blocked", "deferred"}
-            else ""
-        )
-        print(
-            f"  [{account.name}] {mode}: {outcome} — {msg} "
-            f"[{total_commits} commit(s) on branch, +{new_commits} this run]{note}"
-        )
+    note = f" (mycoder: {detail[:160]!r})" if detail and outcome != "success" else ""
+    print(f"  [{account.name}] {mode}: {outcome} — {msg}{note}")
+    ledger.record(
+        tool="fleet_dispatch",
+        kind="dispatch",
+        outcome=outcome,
+        detail=f"{account.name} -> {candidate.id}: {msg}",
+        candidate=candidate.id,
+        account=account.name,
+        branch=branch,
+        attempt=attempt_number,
+        pr_number=pr_number,
+        blocker=blocker,
+        final_message=detail[:500],
+        files_touched=files_touched,
+    )
+    if mycoder_outcome is not None:
+        # Minimal usage record: _today_spend_usd only needs cost_usd. The
+        # richer token/denial breakdown the old inline session recorded isn't
+        # available from mycoder's --json output (it would need parsing the
+        # transcript file mycoder persists) -- a known, accepted gap, not an
+        # oversight.
         ledger.record(
             tool="fleet_dispatch",
-            kind="dispatch",
-            outcome=outcome,
-            detail=f"{account.name} -> {candidate.id}: {msg}",
+            kind="usage",
+            outcome="success",
+            detail=f"{account.name} -> {candidate.id}: ${cost_usd:.4f}",
             candidate=candidate.id,
             account=account.name,
-            branch=branch,
-            attempt=attempt_number,
-            commits=total_commits,
-            new_commits=new_commits,
-            pushed=pushed,
-            pr_number=pr_number,
-            blocker=blocker,
-            final_message=report.final_message[:500],
-            denials_count=len(report.denials),
+            cost_usd=cost_usd,
         )
 
 
@@ -1124,15 +667,6 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=fleet_ask.DEFAULT_ASK_TIMEOUT,
         help="seconds to wait for the human to tap Allow/Deny (default: %(default)s).",
-    )
-    parser.add_argument(
-        "--rtk",
-        action="store_true",
-        help="enable rtk output compression: preflight-verify the rtk hook is "
-        "installed in every account's config dir (never installs it — rtk's own "
-        "`rtk init -g` owns that), and mirror each Bash(X) allowlist entry with "
-        "Bash(rtk X) so the hook's rewritten `rtk <cmd>` commands still pass the "
-        "headless worker's --allowedTools",
     )
     parser.add_argument("--org", default="MyThingsLab")
     parser.add_argument(
@@ -1339,15 +873,6 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  - {p}")
         return 1
 
-    if args.rtk:
-        problems = _preflight_rtk(accounts)
-        if problems:
-            print("rtk compression requested (--rtk) but not wired:")
-            for p in problems:
-                print(f"  - {p}")
-            return 1
-        print("rtk output-compression hook verified for every account")
-
     # Soft halt: a `critical`-labelled issue open anywhere in the org means
     # something security-relevant or fleet-wide-invariant-breaking is
     # unresolved. Stop starting new work until it's closed -- in-flight
@@ -1391,7 +916,7 @@ def main(argv: list[str] | None = None) -> int:
     # duplicate PR for the same issue.
     in_flight = [
         c for c in dispatchable
-        if _open_pr_number(args.org, c.repo, _branch_name(c)) is not None
+        if _open_pr_number(args.org, c.repo, _mycoder_branch(c)) is not None
     ]
     if in_flight:
         ids = {c.id for c in in_flight}
@@ -1434,7 +959,7 @@ def main(argv: list[str] | None = None) -> int:
                     detail=detail,
                     candidate=c.id,
                     account="-",
-                    branch=_branch_name(c),
+                    branch=_mycoder_branch(c),
                     attempt=prior.attempt_number,
                     final_message=prior.final_message[:500],
                 )
@@ -1487,10 +1012,10 @@ def main(argv: list[str] | None = None) -> int:
 
     failures: list[tuple[Account, Candidate, BaseException]] = []
     if pairs:
-        # One worker thread per account: each already runs in its own git
-        # worktree under its own CLAUDE_CONFIG_DIR (mythings.isolation.Workspace),
-        # so nothing about running them at the same time needs new isolation --
-        # only the shared allowlist self-edit does (see _ALLOWLIST_LOCK).
+        # One worker thread per account: each `mycoder build` invocation gets
+        # its own Workspace worktree (mythings.isolation.Workspace, inside
+        # my-coder) under its own CLAUDE_CONFIG_DIR, so nothing about running
+        # them at the same time needs new isolation.
         with ThreadPoolExecutor(max_workers=len(pairs)) as pool:
             futures = {
                 pool.submit(
@@ -1503,7 +1028,6 @@ def main(argv: list[str] | None = None) -> int:
                     ledger=dispatch_ledger,
                     org=args.org,
                     prior=prior,
-                    rtk=args.rtk,
                     ready_timeout=args.ready_timeout,
                     session_timeout_s=args.session_timeout_s,
                 ): (account, candidate)
