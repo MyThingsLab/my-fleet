@@ -4,17 +4,17 @@ build-backend = "hatchling.build"
 
 [project]
 name = "my-fleet"
-version = "1.0.0"
+version = "2.0.0"
 description = "Fleet orchestration/ops tooling for the MyThingsLab tool fleet — dispatch loop, build/study cycle chaining, cross-repo test gate, ASK-channel merge routing, usage/account monitoring."
 authors = [{ name = "Lorenzo Liuzzo", email = "lorenzoliuzzo@outlook.com" }]
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
-# my-things-core, my-orchestrator, my-guard, my-telegram-bot are sibling repos,
-# not on PyPI, and "my-telegram-bot" collides with an unrelated real PyPI
-# package of the same name. Do not list them here — they must be installed
-# explicitly (git+https in CI, editable in the shared local venv), never
-# resolved by pip from this dependency list.
+# my-things-core, my-orchestrator, my-guard, my-telegram-bot, my-coder are
+# sibling repos, not on PyPI, and "my-telegram-bot" collides with an unrelated
+# real PyPI package of the same name. Do not list them here — they must be
+# installed explicitly (git+https in CI, editable in the shared local venv),
+# never resolved by pip from this dependency list.
 dependencies = []
 
 [project.optional-dependencies]
