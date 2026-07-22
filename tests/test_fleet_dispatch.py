@@ -916,6 +916,107 @@ def test_main_escalates_blocker_on_needs_human(tmp_path: Path, monkeypatch) -> N
     assert escalate_calls[0]["attempt"] == fd.MAX_ATTEMPTS
 
 
+def test_main_auto_resumes_a_blocked_candidate_once_its_blocker_closes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # Nothing should have to manually re-trigger this: every main() run
+    # already re-checks _issue_is_open for a blocked candidate's blocker via
+    # the same per-candidate loop that handles fresh/resume/needs_human.
+    dispatch_ledger_path = tmp_path / "ledger.jsonl"
+    monkeypatch.setattr(fd, "DISPATCH_LEDGER", dispatch_ledger_path)
+
+    candidate = fd.Candidate(
+        id="repo#1", repo="repo", tool="", title="t1", kind="issue", created_at="2020-01-01"
+    )
+
+    class FakeRecommendation:
+        def __init__(self, chosen: fd.Candidate) -> None:
+            self.chosen = chosen
+
+    class FakeOrchestrator:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def next_n(self, _n: int) -> list[FakeRecommendation]:
+            return [FakeRecommendation(candidate)]
+
+    monkeypatch.setattr(fd, "Orchestrator", FakeOrchestrator)
+    monkeypatch.setattr(fd, "_preflight_distinct_accounts", lambda accounts: [])
+    monkeypatch.setattr(fd, "_open_pr_number", lambda *a, **k: None)
+    blocked = fd.Attempt(
+        candidate_id="repo#1",
+        outcome="blocked",
+        branch="mycoder/repo-1",
+        attempt_number=1,
+        blocker="MyThingsLab/my-guard#7",
+        final_message="paused on cross-repo blocker MyThingsLab/my-guard#7",
+    )
+    monkeypatch.setattr(fd, "_last_attempt", lambda *a, **k: blocked)
+    monkeypatch.setattr(fd, "_issue_is_open", lambda ref: False)  # the blocker is now closed
+
+    dispatched: list[tuple[str, fd.Attempt | None]] = []
+
+    def fake_dispatch_one(
+        account, candidate, *, execute, max_budget_usd, max_turns, ledger, org,
+        prior=None, ready_timeout=0.0, session_timeout_s=1800.0,
+    ):
+        dispatched.append((candidate.id, prior))
+
+    monkeypatch.setattr(fd, "_dispatch_one", fake_dispatch_one)
+
+    rc = fd.main(["--accounts", str(tmp_path / "a")])
+
+    assert rc == 0
+    assert len(dispatched) == 1
+    dispatched_id, prior = dispatched[0]
+    assert dispatched_id == "repo#1"
+    # Resuming from the closed-blocker attempt, not treated as a fresh start --
+    # its attempt_number must carry forward so a resume-then-fail-again run
+    # still counts toward MAX_ATTEMPTS normally.
+    assert prior is blocked
+    assert prior.attempt_number == 1
+
+
+def test_main_still_skips_a_blocked_candidate_whose_blocker_stays_open(
+    tmp_path: Path, monkeypatch
+) -> None:
+    dispatch_ledger_path = tmp_path / "ledger.jsonl"
+    monkeypatch.setattr(fd, "DISPATCH_LEDGER", dispatch_ledger_path)
+
+    candidate = fd.Candidate(
+        id="repo#1", repo="repo", tool="", title="t1", kind="issue", created_at="2020-01-01"
+    )
+
+    class FakeRecommendation:
+        def __init__(self, chosen: fd.Candidate) -> None:
+            self.chosen = chosen
+
+    class FakeOrchestrator:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def next_n(self, _n: int) -> list[FakeRecommendation]:
+            return [FakeRecommendation(candidate)]
+
+    monkeypatch.setattr(fd, "Orchestrator", FakeOrchestrator)
+    monkeypatch.setattr(fd, "_preflight_distinct_accounts", lambda accounts: [])
+    monkeypatch.setattr(fd, "_open_pr_number", lambda *a, **k: None)
+    blocked = fd.Attempt(
+        candidate_id="repo#1", outcome="blocked", branch="mycoder/repo-1", attempt_number=1,
+        blocker="MyThingsLab/my-guard#7",
+    )
+    monkeypatch.setattr(fd, "_last_attempt", lambda *a, **k: blocked)
+    monkeypatch.setattr(fd, "_issue_is_open", lambda ref: True)  # still open
+
+    dispatched = []
+    monkeypatch.setattr(fd, "_dispatch_one", lambda *a, **k: dispatched.append(a))
+
+    rc = fd.main(["--accounts", str(tmp_path / "a")])
+
+    assert rc == 0
+    assert dispatched == []
+
+
 def test_main_execute_refuses_personal_token_without_optin(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
