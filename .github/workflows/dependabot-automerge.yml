@@ -1,0 +1,32 @@
+name: dependabot-automerge
+
+# Scoped narrowly to the github-actions ecosystem only: CI action version
+# bumps aren't a runtime dependency, so a bad one breaks CI (loud, visible)
+# rather than the tool itself. pip bumps still require a human click.
+# This flips on GitHub's native auto-merge — it still waits for the required
+# `test` status check from branch protection, it does not bypass it.
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  automerge:
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch Dependabot metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: "${{ secrets.GITHUB_TOKEN }}"
+      - name: Enable auto-merge for github-actions bumps
+        if: steps.metadata.outputs.package-ecosystem == 'github_actions'
+        run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
