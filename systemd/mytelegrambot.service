@@ -1,0 +1,36 @@
+# Deployed on the Pi (lollinuxpi-server), checkout at ~/repos/MyThingsLab.
+[Unit]
+Description=MyThingsLab Telegram bot: the long-lived poller (sole owner of the update queue)
+Documentation=https://github.com/MyThingsLab/my-telegram-bot
+After=network-online.target
+Wants=network-online.target
+# Ping the owner over Telegram if the poller dies for good (shared fleet
+# template, same as fleet-usage / fleet-cycle).
+OnFailure=telegram-alert@%n.service
+
+[Service]
+# Long-running, not oneshot: one process owns Telegram's bot-wide offset queue
+# for the lifetime of the bot. This replaces the once-a-minute timer, whose
+# `poll` runs raced `ask`'s own getUpdates long-poll for the same updates.
+Type=simple
+User=lollinuxpi
+WorkingDirectory=/home/lollinuxpi/repos/MyThingsLab/my-telegram-bot
+# venv first so `mytelegrambot` resolves; /usr/bin supplies `gh` and `claude`
+# for the /idea path (file_idea shells out to gh, explore to the Claude CLI).
+Environment=PATH=/home/lollinuxpi/repos/MyThingsLab/.venv/bin:/usr/bin:/bin
+# TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID.
+EnvironmentFile=/home/lollinuxpi/.config/mythingslab/telegram.env
+# The poll cursor (last_update_id), callback decisions, and any ask/notify
+# entries land in this repo's own ledger, resolved relative to WorkingDirectory.
+#
+# --testers-db is deliberately absent here: adding it is what admits testers,
+# and it should be a conscious edit, not a default — see the testers.conf
+# drop-in, which is where it's actually turned on for this deployment.
+ExecStart=/home/lollinuxpi/repos/MyThingsLab/.venv/bin/mytelegrambot run
+Restart=always
+RestartSec=5s
+# A crash-restart resumes from the last committed update_id in the ledger, so a
+# restart loop cannot silently skip a command.
+
+[Install]
+WantedBy=multi-user.target

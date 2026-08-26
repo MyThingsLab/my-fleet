@@ -180,6 +180,22 @@ if yours differs. `FLEET_ACCOUNTS` in the service file is unused by this cycle
 (dispatch is skipped) but still required by `fleet_cycle.py`'s CLI — leave the
 default unless `--accounts` parsing itself needs a real path.
 
+## Deploy: the supervised loop (the Pi)
+
+`systemd/fleet-cycle.{service,timer}`, `fleet-usage.{service,timer}`,
+`mytelegrambot.service(.d/testers.conf)` and `telegram-alert@.service` are
+checked-in reference copies of what actually runs, unprivileged, under
+`lollinuxpi-server`'s system-wide systemd (`/etc/systemd/system/`, not
+`~/.config/systemd/user/`) — the bookkeeping timer above is a separate,
+laptop-side thing. These exist so a path move (like #58's `fleet-dispatch` →
+`my-fleet` rename) is a diffable, reviewable change instead of invisible drift
+between the live `/etc/systemd/system/*.service` files and this repo — that
+exact drift caused 183 consecutive silent `fleet-cycle` failures
+(2026-08-03 → 2026-08-26) before anyone noticed. **Whenever a unit is edited
+live on the Pi, copy the change back here in the same session** — these files
+are documentation of a manual `sudo cp` + `daemon-reload`, not something
+`fleet-cycle.py` deploys itself.
+
 ## License
 
 MIT.
