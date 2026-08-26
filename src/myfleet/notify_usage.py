@@ -48,18 +48,32 @@ def main(argv: list[str] | None = None) -> int:
     messages = []
     for d in newly_over:
         usage = next(u for u in over if u.config_dir == d)
-        messages.append(
-            f"⚠️ Claude account {d} hit {usage.session_pct}% session usage "
-            f"(resets {usage.session_resets}) — rotating it out until reset."
-        )
+        # A probe failure (stale auth, network blip, a logged-out account) is
+        # folded into "over" by select_accounts so it still rotates out --
+        # correct for dispatch, but reporting it as "hit 100% session usage"
+        # sends whoever reads the alert to check quota when the real problem
+        # is that the account never authenticated in the first place.
+        if usage.error:
+            messages.append(
+                f"⚠️ Claude account {d} probe failed: {usage.error} — rotating it out until it recovers."
+            )
+        else:
+            messages.append(
+                f"⚠️ Claude account {d} hit {usage.session_pct}% session usage "
+                f"(resets {usage.session_resets}) — rotating it out until reset."
+            )
     for d in recovered:
         messages.append(f"✅ Claude account {d} session usage reset — back in rotation.")
 
     if not usable and now_over and messages:
-        messages.append("🛑 All configured Claude accounts are over the session-usage ceiling. Fleet dispatch is paused until one resets.")
+        messages.append(
+            "🛑 All configured Claude accounts are over the session-usage ceiling. Fleet dispatch is paused until one resets."
+        )
 
     if messages and os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"):
-        transport = HTTPTelegramTransport(os.environ["TELEGRAM_BOT_TOKEN"], os.environ["TELEGRAM_CHAT_ID"])
+        transport = HTTPTelegramTransport(
+            os.environ["TELEGRAM_BOT_TOKEN"], os.environ["TELEGRAM_CHAT_ID"]
+        )
         transport.send_message("\n".join(messages))
 
     for m in messages:

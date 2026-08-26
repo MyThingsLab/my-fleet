@@ -21,8 +21,10 @@ class FakeTransport:
         self.sent.append(text)
 
 
-def usage(config_dir: str, pct: int = 95) -> SimpleNamespace:
-    return SimpleNamespace(config_dir=config_dir, session_pct=pct, session_resets="18:00")
+def usage(config_dir: str, pct: int = 95, error: str = "") -> SimpleNamespace:
+    return SimpleNamespace(
+        config_dir=config_dir, session_pct=pct, session_resets="18:00", error=error
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -54,6 +56,20 @@ def test_recovery_alerts_and_clears_state(monkeypatch: pytest.MonkeyPatch) -> No
     run([], [usage("b")], monkeypatch)
     run([usage("b", 5)], [], monkeypatch)
     assert any("back in rotation" in m for t in FakeTransport.instances for m in t.sent)
+
+
+def test_probe_failure_is_reported_distinctly_from_a_real_quota_hit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression test: select_accounts folds a probe failure (stale auth, a
+    # logged-out account) into "over" with session_pct forced to 100 so it
+    # still rotates out -- but the alert must say so, not claim a real 100%
+    # reading, or the operator goes looking for a quota problem that isn't one.
+    run([], [usage("a", 100, error="claude -p /usage failed for a: Not logged in")], monkeypatch)
+    (transport,) = FakeTransport.instances
+    assert "probe failed" in transport.sent[0]
+    assert "Not logged in" in transport.sent[0]
+    assert "hit 100% session usage" not in transport.sent[0]
 
 
 def test_all_over_adds_the_stalled_alarm(monkeypatch: pytest.MonkeyPatch) -> None:

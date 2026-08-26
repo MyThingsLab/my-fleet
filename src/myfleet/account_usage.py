@@ -23,6 +23,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from dataclasses import dataclass
 
 
@@ -70,7 +71,9 @@ def _run_usage_probe(config_dir: str, timeout: float = 30.0) -> str:
     try:
         obj = json.loads(proc.stdout)
     except json.JSONDecodeError as exc:
-        raise UsageCheckError(f"unparseable /usage output for {config_dir}: {proc.stdout[:200]}") from exc
+        raise UsageCheckError(
+            f"unparseable /usage output for {config_dir}: {proc.stdout[:200]}"
+        ) from exc
     result = obj.get("result", "")
     if not result:
         raise UsageCheckError(f"empty /usage result for {config_dir}")
@@ -97,7 +100,9 @@ def check_all(config_dirs: list[str]) -> list[AccountUsage]:
     return [check_account(d) for d in config_dirs]
 
 
-def select_accounts(config_dirs: list[str], max_session_pct: int = 90) -> tuple[list[AccountUsage], list[AccountUsage]]:
+def select_accounts(
+    config_dirs: list[str], max_session_pct: int = 90
+) -> tuple[list[AccountUsage], list[AccountUsage]]:
     """Split accounts into (usable, over-threshold), preserving input order.
 
     A single account's probe failing (network blip, stale auth, a hung
@@ -130,21 +135,30 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--accounts", required=True, help="comma-separated CLAUDE_CONFIG_DIR paths")
     parser.add_argument("--max-session-pct", type=int, default=90)
-    parser.add_argument("--quiet", action="store_true", help="print only the usable config-dir list")
+    parser.add_argument(
+        "--quiet", action="store_true", help="print only the usable config-dir list"
+    )
     args = parser.parse_args(argv)
 
     config_dirs = [d.strip() for d in args.accounts.split(",") if d.strip()]
     usable, over = select_accounts(config_dirs, args.max_session_pct)
 
+    # Diagnostics go to stderr, deliberately: stdout carries exactly one line
+    # (the usable CSV, possibly empty) for callers like run_fleet_cycle.sh that
+    # capture it via `USABLE="$(... )"`. Mixing a human-readable [ERROR]/[OVER]
+    # line onto the same stream a caller parses meant `$(cmd | tail -1)` could
+    # pick a diagnostic line instead of the CSV, depending on how many trailing
+    # newlines command substitution happened to strip that run.
     if not args.quiet:
         for u in usable + over:
             if u.error:
-                print(f"[ERROR] {u.config_dir}: probe failed: {u.error}")
+                print(f"[ERROR] {u.config_dir}: probe failed: {u.error}", file=sys.stderr)
                 continue
             flag = "OVER" if u.session_pct >= args.max_session_pct else "ok"
             print(
                 f"[{flag}] {u.config_dir}: session {u.session_pct}% (resets {u.session_resets}), "
-                f"week {u.week_pct}% (resets {u.week_resets})"
+                f"week {u.week_pct}% (resets {u.week_resets})",
+                file=sys.stderr,
             )
 
     print(",".join(u.config_dir for u in usable))

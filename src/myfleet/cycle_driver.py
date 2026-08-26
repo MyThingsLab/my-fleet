@@ -16,12 +16,33 @@ aborting the rest of the pass.
 
 from __future__ import annotations
 
+import importlib
 import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 Runner = Callable[..., int]
+
+
+def import_or_die(module_name: str, attr_name: str, sibling_repo: str):
+    # my-fleet's cycle depends on sibling packages (my-pipeline's build_plan)
+    # that live in their own repo and must be `pip install -e`'d into this
+    # venv separately from a `git pull` of my-fleet itself. A missing one
+    # otherwise surfaces as a bare ModuleNotFoundError traceback at import
+    # time, deep enough that an operator reading a systemd journal has to
+    # trace it back to "which repo do I even need to install" by hand -- this
+    # happened for real (my-fleet, then my-pipeline, each once) the first time
+    # the Pi's scheduler was brought back after a repo move landed on GitHub
+    # but never reached the box that runs it.
+    try:
+        module = importlib.import_module(module_name)
+    except ModuleNotFoundError as exc:
+        raise SystemExit(
+            f"{module_name} is not importable ({exc}). Install its sibling "
+            f"repo into this environment: pip install -e ../{sibling_repo}"
+        ) from exc
+    return getattr(module, attr_name)
 
 
 def run_command(
