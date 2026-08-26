@@ -149,6 +149,20 @@ def test_cycle_stage_order_follows_the_graph_plan(
     assert tools.index("mypipeline") < tools.index("mytelegrambot")
 
 
+def test_cycle_announces_the_researcher_tester_changelogger_wave(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # These three no longer chain off each other in the graph (see
+    # my-pipeline's workflows.json) -- assert the driver actually surfaces
+    # that as a wave, not just that build_waves() computes one nobody reads.
+    _capture_runs(monkeypatch)
+    monkeypatch.setattr(fc, "WORKSPACE_ROOT", tmp_path)
+    (tmp_path / fc.DOCS_SITE_CLONE).mkdir()
+    fc.main(["--accounts", "/tmp/acct", "--skip-dispatch", "--execute", "--brief-count", "0"])
+    out = capsys.readouterr().out
+    assert "wave: myresearcher, mytester, mychangelogger" in out
+
+
 def test_execute_runs_mypipeline_sync_handoff_stage(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -167,7 +181,7 @@ def test_unknown_graph_stage_is_skipped_not_fatal(
     from mypipeline.plan import PlanItem
 
     calls = _capture_runs(monkeypatch)
-    monkeypatch.setattr(fc, "build_plan", lambda: [PlanItem("x", "no-such-stage", "none")])
+    monkeypatch.setattr(fc, "build_waves", lambda: [[PlanItem("x", "no-such-stage", "none")]])
     fc.main(["--accounts", "/tmp/acct", "--skip-dispatch", "--execute", "--brief-count", "0"])
     assert calls == []
     assert "no resolver for graph stage 'no-such-stage'" in capsys.readouterr().out

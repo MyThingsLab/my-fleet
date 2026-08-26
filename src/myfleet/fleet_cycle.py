@@ -2,14 +2,19 @@
 """Run one full autonomous fleet cycle by chaining every tool's own CLI.
 
 The step *order* is no longer hand-coded here: it comes from my-pipeline's
-declarative graph (`mypipeline.plan.build_plan`), the fleet's one source of
+declarative graph (`mypipeline.plan.build_waves`), the fleet's one source of
 tool-chaining truth. Each graph node names a `stage`; a resolver in this file
 (RESOLVERS below) binds that stage to concrete argv at run time -- my-pipeline
 owns *what runs and in what order*, my-fleet owns *how each stage binds and
-whether we can afford to tick now*. The default graph reproduces the order this
-docstring used to enumerate by hand:
+whether we can afford to tick now*. `build_waves` groups nodes that share no
+dependency on each other into the same wave; this driver still ticks wave
+members one at a time (no concurrent subprocesses yet), but no longer chains
+them behind an `after` edge that isn't real. The default graph reproduces the
+order this docstring used to enumerate by hand, with myresearcher/mytester/
+mychangelogger now a 3-way wave (none reads another's output; all three only
+need fleet-dispatch to have run):
 
-  myplanner -> fleet_dispatch -> myresearcher -> mytester -> mychangelogger ->
+  myplanner -> fleet_dispatch -> {myresearcher, mytester, mychangelogger} ->
   mydocs -> mydashboard -> myprojector -> myreporter -> mypipeline sync
   (fire ledger handoffs) -> mytelegrambot notify.
 
@@ -54,7 +59,7 @@ import myfleet.fleet_ask as fleet_ask
 from myfleet.cycle_driver import Stage, import_or_die, run_command
 from myfleet.fleet_dispatch import DISPATCH_LEDGER, HALT_MARKER, _critical_halt_issues
 
-build_plan = import_or_die("mypipeline.plan", "build_plan", "my-pipeline")
+build_waves = import_or_die("mypipeline.plan", "build_waves", "my-pipeline")
 
 # Climbs myfleet/<file>.py -> src -> my-fleet -> MyThingsLab/ (the fleet root).
 WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
@@ -421,13 +426,16 @@ def _run_cycle(args: argparse.Namespace, *, accounts: str, skip_dispatch: bool, 
             return
 
     ctx = _Ctx(args=args, accounts=accounts, skip_dispatch=skip_dispatch, py=py)
-    for item in build_plan():
-        resolver = RESOLVERS.get(item.stage)
-        if resolver is None:
-            print(f"(no resolver for graph stage {item.stage!r} — skipping)")
-            continue
-        for stage in resolver(ctx):
-            _execute_stage(stage, execute=args.execute)
+    for wave in build_waves():
+        if len(wave) > 1:
+            print(f"(wave: {', '.join(i.stage for i in wave)} — no dependency between them)")
+        for item in wave:
+            resolver = RESOLVERS.get(item.stage)
+            if resolver is None:
+                print(f"(no resolver for graph stage {item.stage!r} — skipping)")
+                continue
+            for stage in resolver(ctx):
+                _execute_stage(stage, execute=args.execute)
 
 
 def _loop_should_stop(
