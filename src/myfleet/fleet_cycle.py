@@ -47,13 +47,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from mypipeline.plan import build_plan
 from mythings.ledger import Ledger
 
 import myfleet.account_usage as account_usage
 import myfleet.fleet_ask as fleet_ask
-from myfleet.cycle_driver import Stage, run_command
+from myfleet.cycle_driver import Stage, import_or_die, run_command
 from myfleet.fleet_dispatch import DISPATCH_LEDGER, HALT_MARKER, _critical_halt_issues
+
+build_plan = import_or_die("mypipeline.plan", "build_plan", "my-pipeline")
 
 # Climbs myfleet/<file>.py -> src -> my-fleet -> MyThingsLab/ (the fleet root).
 WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
@@ -80,9 +81,7 @@ EXCLUDED_REPOS = {"my-template"}
 
 def tool_repos(root: Path) -> list[str]:
     return sorted(
-        p.parent.name
-        for p in root.glob("*/pyproject.toml")
-        if p.parent.name not in EXCLUDED_REPOS
+        p.parent.name for p in root.glob("*/pyproject.toml") if p.parent.name not in EXCLUDED_REPOS
     )
 
 
@@ -115,14 +114,36 @@ def _select_brief_issues(
 
 
 def _brief_candidates(count: int) -> list[int] | None:
-    issues = _gh_json([
-        "issue", "list", "--repo", STUDY_REPO, "--label", RESEARCH_LABEL,
-        "--state", "open", "--json", "number", "--limit", "200",
-    ])
-    prs = _gh_json([
-        "pr", "list", "--repo", STUDY_REPO, "--state", "open",
-        "--json", "headRefName", "--limit", "200",
-    ])
+    issues = _gh_json(
+        [
+            "issue",
+            "list",
+            "--repo",
+            STUDY_REPO,
+            "--label",
+            RESEARCH_LABEL,
+            "--state",
+            "open",
+            "--json",
+            "number",
+            "--limit",
+            "200",
+        ]
+    )
+    prs = _gh_json(
+        [
+            "pr",
+            "list",
+            "--repo",
+            STUDY_REPO,
+            "--state",
+            "open",
+            "--json",
+            "headRefName",
+            "--limit",
+            "200",
+        ]
+    )
     if issues is None or prs is None:
         return None
     return _select_brief_issues(
@@ -143,9 +164,7 @@ def _cycle_halt_reason() -> str | None:
         )
     critical = _critical_halt_issues(ORG)
     if critical:
-        refs = ", ".join(
-            f"{i['repository']['nameWithOwner']}#{i['number']}" for i in critical
-        )
+        refs = ", ".join(f"{i['repository']['nameWithOwner']}#{i['number']}" for i in critical)
         return f"critical issue(s) open: {refs}"
     return None
 
@@ -165,14 +184,26 @@ class _Ctx:
 # --execute. This is the runtime binding my-pipeline's graph deliberately does
 # not hold -- accounts, per-repo fan-out, live gh queries, missing-clone guards.
 def _stage_planner(ctx: _Ctx) -> list[Stage]:
-    return [Stage("myplanner", [
-        "myplanner", "plan",
-        "--org", ORG,
-        "--repo-root", str(WORKSPACE_ROOT),
-        "--tracking-repo", TRACKING_REPO,
-        "--tracking-issue", TRACKING_ISSUE,
-        "--engine", ctx.args.engine,
-    ], mutating=False)]
+    return [
+        Stage(
+            "myplanner",
+            [
+                "myplanner",
+                "plan",
+                "--org",
+                ORG,
+                "--repo-root",
+                str(WORKSPACE_ROOT),
+                "--tracking-repo",
+                TRACKING_REPO,
+                "--tracking-issue",
+                TRACKING_ISSUE,
+                "--engine",
+                ctx.args.engine,
+            ],
+            mutating=False,
+        )
+    ]
 
 
 def _stage_dispatch(ctx: _Ctx) -> list[Stage]:
@@ -195,23 +226,38 @@ def _stage_researcher(ctx: _Ctx) -> list[Stage]:
     if candidates is None:
         return [Stage("myresearcher", [], skip=f"could not query {STUDY_REPO}")]
     if not candidates:
-        return [Stage(
-            "myresearcher", [], skip=f"no open {RESEARCH_LABEL} issues in {STUDY_REPO} left to brief"
-        )]
+        return [
+            Stage(
+                "myresearcher",
+                [],
+                skip=f"no open {RESEARCH_LABEL} issues in {STUDY_REPO} left to brief",
+            )
+        ]
     # ClaudeCLIEngine needs an authenticated CLI; borrow the first fleet
     # account's CLAUDE_CONFIG_DIR (TAVILY_API_KEY is not set on this host, so
     # retrieval sticks to keyless arXiv).
     account = ctx.accounts.split(",")[0].strip()
     env = {**os.environ, "CLAUDE_CONFIG_DIR": str(Path(account).expanduser())}
     return [
-        Stage("myresearcher", [
-            "myresearcher", "brief",
-            "--issue", str(number),
-            "--repo", STUDY_REPO,
-            "--repo-root", str(STUDY_ROOT),
-            "--engine", ctx.args.engine,
-            "--sources", "arxiv",
-        ], mutating=True, env=env)
+        Stage(
+            "myresearcher",
+            [
+                "myresearcher",
+                "brief",
+                "--issue",
+                str(number),
+                "--repo",
+                STUDY_REPO,
+                "--repo-root",
+                str(STUDY_ROOT),
+                "--engine",
+                ctx.args.engine,
+                "--sources",
+                "arxiv",
+            ],
+            mutating=True,
+            env=env,
+        )
         for number in candidates
     ]
 
@@ -219,7 +265,14 @@ def _stage_researcher(ctx: _Ctx) -> list[Stage]:
 def _stage_tester(ctx: _Ctx) -> list[Stage]:
     stages = []
     for repo in tool_repos(WORKSPACE_ROOT):
-        cmd = ["mytester", "run", "--source", str(WORKSPACE_ROOT / repo), "--engine", ctx.args.engine]
+        cmd = [
+            "mytester",
+            "run",
+            "--source",
+            str(WORKSPACE_ROOT / repo),
+            "--engine",
+            ctx.args.engine,
+        ]
         if not ctx.args.execute:
             cmd.append("--local-only")
         stages.append(Stage("mytester", cmd, mutating=False))
@@ -228,7 +281,9 @@ def _stage_tester(ctx: _Ctx) -> list[Stage]:
 
 def _stage_changelogger(ctx: _Ctx) -> list[Stage]:
     return [
-        Stage("mychangelogger", ["mychangelogger", "update", "--source", str(WORKSPACE_ROOT / repo)])
+        Stage(
+            "mychangelogger", ["mychangelogger", "update", "--source", str(WORKSPACE_ROOT / repo)]
+        )
         for repo in tool_repos(WORKSPACE_ROOT)
     ]
 
@@ -237,53 +292,92 @@ def _stage_docs(ctx: _Ctx) -> list[Stage]:
     docs_site_root = WORKSPACE_ROOT / DOCS_SITE_CLONE
     if not docs_site_root.is_dir():
         return [Stage("mydocs", [], skip=f"no local docs-site clone at {docs_site_root}")]
-    return [Stage("mydocs", [
-        "mydocs", "sync", "--all",
-        "--repo-root", str(docs_site_root),
-        "--engine", ctx.args.engine,
-    ])]
+    return [
+        Stage(
+            "mydocs",
+            [
+                "mydocs",
+                "sync",
+                "--all",
+                "--repo-root",
+                str(docs_site_root),
+                "--engine",
+                ctx.args.engine,
+            ],
+        )
+    ]
 
 
 def _stage_dashboard(ctx: _Ctx) -> list[Stage]:
     docs_site_root = WORKSPACE_ROOT / DOCS_SITE_CLONE
     if not docs_site_root.is_dir():
         return [Stage("mydashboard", [], skip=f"no local docs-site clone at {docs_site_root}")]
-    return [Stage("mydashboard", [
-        "mydashboard", "render",
-        "--repo-root", str(docs_site_root),
-        "--workspace", str(WORKSPACE_ROOT),
-        "--engine", ctx.args.engine,
-    ])]
+    return [
+        Stage(
+            "mydashboard",
+            [
+                "mydashboard",
+                "render",
+                "--repo-root",
+                str(docs_site_root),
+                "--workspace",
+                str(WORKSPACE_ROOT),
+                "--engine",
+                ctx.args.engine,
+            ],
+        )
+    ]
 
 
 def _stage_projector(ctx: _Ctx) -> list[Stage]:
     cmd = [
-        "myprojector", "sync",
-        "--org", ORG,
-        "--project-number", PROJECT_NUMBER,
-        "--tracking-repo", TRACKING_REPO,
-        "--tracking-issue", TRACKING_ISSUE,
-        "--engine", ctx.args.engine,
+        "myprojector",
+        "sync",
+        "--org",
+        ORG,
+        "--project-number",
+        PROJECT_NUMBER,
+        "--tracking-repo",
+        TRACKING_REPO,
+        "--tracking-issue",
+        TRACKING_ISSUE,
+        "--engine",
+        ctx.args.engine,
     ]
     cmd.append("--apply-checklist" if ctx.args.execute else "--dry-run")
     return [Stage("myprojector", cmd, mutating=False)]
 
 
 def _stage_reporter(ctx: _Ctx) -> list[Stage]:
-    return [Stage("myreporter", [
-        "myreporter", "post",
-        "--repo", TRACKING_REPO,
-        "--issue", TRACKING_ISSUE,
-        "--repo-root", str(WORKSPACE_ROOT),
-        "--summarize",
-        "--engine", ctx.args.engine,
-    ])]
+    return [
+        Stage(
+            "myreporter",
+            [
+                "myreporter",
+                "post",
+                "--repo",
+                TRACKING_REPO,
+                "--issue",
+                TRACKING_ISSUE,
+                "--repo-root",
+                str(WORKSPACE_ROOT),
+                "--summarize",
+                "--engine",
+                ctx.args.engine,
+            ],
+        )
+    ]
 
 
 def _stage_handoffs(ctx: _Ctx) -> list[Stage]:
     # Fire the graph's ledger->issue handoffs (the file-issue nodes) -- the
     # third chaining axis, now wired into the cycle it used to sit beside.
-    return [Stage("mypipeline-sync", ["mypipeline", "sync", "--repo-root", str(WORKSPACE_ROOT), "--org", ORG])]
+    return [
+        Stage(
+            "mypipeline-sync",
+            ["mypipeline", "sync", "--repo-root", str(WORKSPACE_ROOT), "--org", ORG],
+        )
+    ]
 
 
 def _stage_telegram(ctx: _Ctx) -> list[Stage]:
@@ -337,7 +431,11 @@ def _run_cycle(args: argparse.Namespace, *, accounts: str, skip_dispatch: bool, 
 
 
 def _loop_should_stop(
-    *, elapsed_min: float, spent_usd: float, max_duration_min: float | None, max_cycle_budget_usd: float | None,
+    *,
+    elapsed_min: float,
+    spent_usd: float,
+    max_duration_min: float | None,
+    max_cycle_budget_usd: float | None,
 ) -> str | None:
     """Pure breakout check, split out from _run_loop so it's testable without
     a fake clock: returns the reason to stop, or None to keep looping."""
@@ -348,7 +446,9 @@ def _loop_should_stop(
     return None
 
 
-def _next_backoff_s(current_backoff_s: float, *, dispatched: bool, idle_backoff_s: float, max_backoff_s: float) -> float:
+def _next_backoff_s(
+    current_backoff_s: float, *, dispatched: bool, idle_backoff_s: float, max_backoff_s: float
+) -> float:
     if dispatched:
         return idle_backoff_s
     return min(current_backoff_s * 2.0, max_backoff_s)
@@ -410,8 +510,10 @@ def _run_loop(args: argparse.Namespace, py: str) -> int:
             for e in dispatch_ledger.read(tool="fleet_dispatch", kind="usage")[start_usage_count:]
         )
         stop_reason = _loop_should_stop(
-            elapsed_min=elapsed_min, spent_usd=spent_usd,
-            max_duration_min=args.max_duration_min, max_cycle_budget_usd=args.max_cycle_budget_usd,
+            elapsed_min=elapsed_min,
+            spent_usd=spent_usd,
+            max_duration_min=args.max_duration_min,
+            max_cycle_budget_usd=args.max_cycle_budget_usd,
         )
         if stop_reason is not None:
             print(f"(--loop stopping: {stop_reason})")
@@ -420,7 +522,10 @@ def _run_loop(args: argparse.Namespace, py: str) -> int:
         # account_usage.select_accounts spends one real `claude -p /usage` call
         # per account, so this is polled on a cadence, not every iteration.
         now = time.monotonic()
-        if last_account_check is None or (now - last_account_check) >= args.account_recheck_min * 60.0:
+        if (
+            last_account_check is None
+            or (now - last_account_check) >= args.account_recheck_min * 60.0
+        ):
             usable, over = account_usage.select_accounts(pool, args.max_session_pct)
             usable_accounts = [u.config_dir for u in usable]
             last_account_check = now
@@ -434,7 +539,9 @@ def _run_loop(args: argparse.Namespace, py: str) -> int:
             _refresh_ask_channel(dispatch_ledger, timeout=args.ask_timeout)
 
         iteration += 1
-        print(f"\n=== loop iteration {iteration} ({elapsed_min:.1f} min elapsed, ${spent_usd:.2f} spent) ===")
+        print(
+            f"\n=== loop iteration {iteration} ({elapsed_min:.1f} min elapsed, ${spent_usd:.2f} spent) ==="
+        )
         skip_dispatch = args.skip_dispatch or not usable_accounts
         if not usable_accounts:
             print("(no usable accounts this iteration — skipping dispatch, not stopping the loop)")
@@ -445,7 +552,9 @@ def _run_loop(args: argparse.Namespace, py: str) -> int:
         dispatched = len(dispatch_ledger.read(tool="fleet_dispatch")) > entries_before
 
         backoff_s = _next_backoff_s(
-            backoff_s, dispatched=dispatched, idle_backoff_s=idle_backoff_s,
+            backoff_s,
+            dispatched=dispatched,
+            idle_backoff_s=idle_backoff_s,
             max_backoff_s=args.max_backoff_min * 60.0,
         )
         if not dispatched:
@@ -454,12 +563,33 @@ def _run_loop(args: argparse.Namespace, py: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--accounts", required=True, help="passed through to fleet_dispatch.py --accounts (--loop: the candidate pool, re-filtered each recheck)")
-    parser.add_argument("--execute", action="store_true", help="run mutating subcommands for real (all steps)")
-    parser.add_argument("--dispatch-execute", action="store_true", help="also let fleet_dispatch spawn real headless sessions (separate from --execute since it's billed)")
-    parser.add_argument("--engine", choices=["noop", "claude-cli"], default="noop", help="Engine backend for planner/tester/projector/reporter")
-    parser.add_argument("--skip-dispatch", action="store_true", help="skip step 2 (fleet_dispatch); --loop: applies to every iteration")
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--accounts",
+        required=True,
+        help="passed through to fleet_dispatch.py --accounts (--loop: the candidate pool, re-filtered each recheck)",
+    )
+    parser.add_argument(
+        "--execute", action="store_true", help="run mutating subcommands for real (all steps)"
+    )
+    parser.add_argument(
+        "--dispatch-execute",
+        action="store_true",
+        help="also let fleet_dispatch spawn real headless sessions (separate from --execute since it's billed)",
+    )
+    parser.add_argument(
+        "--engine",
+        choices=["noop", "claude-cli"],
+        default="noop",
+        help="Engine backend for planner/tester/projector/reporter",
+    )
+    parser.add_argument(
+        "--skip-dispatch",
+        action="store_true",
+        help="skip step 2 (fleet_dispatch); --loop: applies to every iteration",
+    )
     parser.add_argument(
         "--allow-personal-token",
         action="store_true",
@@ -488,14 +618,50 @@ def main(argv: list[str] | None = None) -> int:
         default=fleet_ask.DEFAULT_ASK_TIMEOUT,
         help="seconds to wait for the human to tap Allow/Deny (default: %(default)s)",
     )
-    parser.add_argument("--brief-count", type=int, default=1, help="max open my-researcher topic issues in MyThingsLab/study to brief per cycle (one billed Engine call each with --engine claude-cli; 0 disables the step)")
-    parser.add_argument("--loop", action="store_true", help="keep cycling instead of running once (see module docstring)")
-    parser.add_argument("--max-duration-min", type=float, default=None, help="--loop only: stop after this many wall-clock minutes (default: run indefinitely)")
-    parser.add_argument("--max-cycle-budget-usd", type=float, default=None, help="--loop only: stop once fleet_dispatch's aggregate cost_usd since the loop started reaches this cap (default: no cap)")
-    parser.add_argument("--account-recheck-min", type=float, default=10.0, help="--loop only: how often to re-poll account_usage.select_accounts")
-    parser.add_argument("--max-session-pct", type=int, default=90, help="--loop only: per-account session-usage ceiling passed to account_usage.select_accounts")
-    parser.add_argument("--idle-backoff-min", type=float, default=1.0, help="--loop only: backoff between iterations that dispatched nothing")
-    parser.add_argument("--max-backoff-min", type=float, default=30.0, help="--loop only: backoff ceiling")
+    parser.add_argument(
+        "--brief-count",
+        type=int,
+        default=1,
+        help="max open my-researcher topic issues in MyThingsLab/study to brief per cycle (one billed Engine call each with --engine claude-cli; 0 disables the step)",
+    )
+    parser.add_argument(
+        "--loop",
+        action="store_true",
+        help="keep cycling instead of running once (see module docstring)",
+    )
+    parser.add_argument(
+        "--max-duration-min",
+        type=float,
+        default=None,
+        help="--loop only: stop after this many wall-clock minutes (default: run indefinitely)",
+    )
+    parser.add_argument(
+        "--max-cycle-budget-usd",
+        type=float,
+        default=None,
+        help="--loop only: stop once fleet_dispatch's aggregate cost_usd since the loop started reaches this cap (default: no cap)",
+    )
+    parser.add_argument(
+        "--account-recheck-min",
+        type=float,
+        default=10.0,
+        help="--loop only: how often to re-poll account_usage.select_accounts",
+    )
+    parser.add_argument(
+        "--max-session-pct",
+        type=int,
+        default=90,
+        help="--loop only: per-account session-usage ceiling passed to account_usage.select_accounts",
+    )
+    parser.add_argument(
+        "--idle-backoff-min",
+        type=float,
+        default=1.0,
+        help="--loop only: backoff between iterations that dispatched nothing",
+    )
+    parser.add_argument(
+        "--max-backoff-min", type=float, default=30.0, help="--loop only: backoff ceiling"
+    )
     args = parser.parse_args(argv)
 
     if args.ask_human:
@@ -519,7 +685,9 @@ def main(argv: list[str] | None = None) -> int:
     _run_cycle(args, accounts=args.accounts, skip_dispatch=args.skip_dispatch, py=py)
 
     if not args.execute:
-        print("\n(dry run — pass --execute to run myresearcher/mytester/mychangelogger/mydocs/mydashboard/myprojector/myreporter/mytelegrambot for real; --dispatch-execute for fleet_dispatch's billed sessions)")
+        print(
+            "\n(dry run — pass --execute to run myresearcher/mytester/mychangelogger/mydocs/mydashboard/myprojector/myreporter/mytelegrambot for real; --dispatch-execute for fleet_dispatch's billed sessions)"
+        )
     return 0
 
 

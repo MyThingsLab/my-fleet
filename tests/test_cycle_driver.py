@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 import myfleet.cycle_driver as cd
-from myfleet.cycle_driver import Stage, run_cycle, run_stage
+from myfleet.cycle_driver import Stage, import_or_die, run_cycle, run_stage
 
 
 def _recorder():
@@ -62,8 +62,29 @@ def test_run_cycle_runs_all_and_returns_worst_rc(tmp_path: Path) -> None:
     assert worst == 2
 
 
-def test_run_command_reports_and_returns_code(tmp_path: Path,
-                                              capsys: pytest.CaptureFixture[str]) -> None:
+def test_run_command_reports_and_returns_code(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     rc = cd.run_command(["true"], cwd=tmp_path)
     assert rc == 0
     assert "$ true" in capsys.readouterr().out
+
+
+def test_import_or_die_returns_the_attribute_on_success() -> None:
+    assert (
+        import_or_die("os.path", "join", "irrelevant")
+        is __import__("os.path", fromlist=["join"]).join
+    )
+
+
+def test_import_or_die_exits_with_an_actionable_message_on_a_missing_sibling() -> None:
+    # Regression test: my-fleet's cycle depends on my-pipeline's build_plan,
+    # which lives in a sibling repo that must be pip-installed separately from
+    # a `git pull` of my-fleet -- this happened for real on the Pi scheduler.
+    # A bare ModuleNotFoundError traceback makes an operator trace the missing
+    # module name back to a repo by hand; this should name the repo directly.
+    with pytest.raises(SystemExit) as exc_info:
+        import_or_die("definitely_not_a_real_package", "thing", "my-pipeline")
+    message = str(exc_info.value)
+    assert "definitely_not_a_real_package" in message
+    assert "pip install -e ../my-pipeline" in message
