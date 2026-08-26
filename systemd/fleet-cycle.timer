@@ -1,0 +1,10 @@
+[Unit]
+Description=Run MyThingsLab fleet cycle every 6 hours
+
+[Timer]
+OnCalendar=*-*-* 0,6,12,18:00:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

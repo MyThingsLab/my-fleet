@@ -1,0 +1,14 @@
+# Deployed on the Pi (lollinuxpi-server), checkout at ~/repos/MyThingsLab.
+# Templated: one instance per watched unit via OnFailure=telegram-alert@%n.service
+# on fleet-cycle/fleet-usage/mytelegrambot. %i is the failing unit's name.
+[Unit]
+Description=Telegram alert for failed unit %i
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=lollinuxpi
+WorkingDirectory=/home/lollinuxpi/repos/MyThingsLab/my-fleet
+Environment=PATH=/home/lollinuxpi/repos/MyThingsLab/.venv/bin:/usr/bin:/bin
+EnvironmentFile=-/home/lollinuxpi/.config/mythingslab/telegram.env
+ExecStart=/home/lollinuxpi/repos/MyThingsLab/.venv/bin/notify-systemd-status %i
