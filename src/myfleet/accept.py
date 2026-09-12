@@ -59,13 +59,9 @@ ORG = "MyThingsLab"
 # is (glob-ish prefix or suffix, why). The common thread: merging a bad change
 # to one of these removes the ability to catch the next bad change, so they are
 # exactly the files a gate must not be able to wave through.
-CARVE_OUTS: tuple[tuple[str, str], ...] = (
-    # A gate must never certify itself. If accept.py could accept a change to
-    # accept.py, one bad merge silently widens every future merge.
-    ("src/myfleet/accept.py", "the acceptance gate's own code"),
-    ("src/myfleet/merge_ready_prs.py", "a myfleet merge path"),
-    ("src/myfleet/merge_order_prs.py", "a myfleet merge path"),
-    ("src/myfleet/fleet_dispatch.py", "the dispatch path that opens PRs"),
+#
+# Applied to every repo, because none of these are one repo's problem.
+SHARED_CARVE_OUTS: tuple[tuple[str, str], ...] = (
     # The constraints on agents. An agent that can merge a relaxation of its own
     # constraints has no constraints, only a delay.
     ("CLAUDE.md", "the rules that constrain agents"),
@@ -74,8 +70,31 @@ CARVE_OUTS: tuple[tuple[str, str], ...] = (
     (".claude/", "agent permissions and settings"),
     # Credentials. A redaction bug is invisible in a diff that looks tidy.
     ("_secrets.py", "credential handling"),
-    ("src/mythings/policy.py", "the policy contract"),
 )
+
+# The code deciding what agents may do, which is spread across repos: my-fleet
+# dispatches and merges, my-coder opens the PRs, my-guard *is* the policy
+# engine, and mythings.policy is the contract all three speak. A list shaped
+# around my-fleet alone let my-coder#30 -- a change to exactly where the PR-open
+# action is gated -- come back `accepted` (#41).
+REPO_CARVE_OUTS: dict[str, tuple[tuple[str, str], ...]] = {
+    "my-fleet": (
+        # A gate must never certify itself. If accept.py could accept a change
+        # to accept.py, one bad merge silently widens every future merge.
+        ("src/myfleet/accept.py", "the acceptance gate's own code"),
+        ("src/myfleet/merge_ready_prs.py", "a myfleet merge path"),
+        ("src/myfleet/merge_order_prs.py", "a myfleet merge path"),
+        ("src/myfleet/fleet_dispatch.py", "the dispatch path that opens PRs"),
+    ),
+    "my-coder": (
+        ("src/mycoder/coder.py", "where the PR-open action is gated"),
+        ("src/mycoder/cli.py", "decides whether a policy is wired at all"),
+    ),
+    # Whole package, not a file list: my-guard is the policy mechanism itself,
+    # so a change anywhere in it can widen what every other tool may do.
+    "my-guard": (("src/myguard/", "the policy engine every other tool defers to"),),
+    "my-things-core": (("src/mythings/policy.py", "the policy contract"),),
+}
 
 # Churn a PR may contain, by the `size:` label on the issue it closes. The gate
 # reuses the CAD label schema rather than inventing a second scale: the point of
@@ -155,9 +174,17 @@ def changed_files(repo: str, number: int) -> list[dict] | None:
     return json.loads(out).get("files") or []
 
 
-def carve_out_for(paths: list[str]) -> tuple[str, str] | None:
+def carve_outs_for_repo(repo: str) -> tuple[tuple[str, str], ...]:
+    # An unknown repo gets the shared set, never an empty one. Most of the ~44
+    # repos are not in the map and never will be, so the default is the case
+    # that matters: forgetting to add a repo must not silently disable its
+    # carve-outs.
+    return SHARED_CARVE_OUTS + REPO_CARVE_OUTS.get(repo, ())
+
+
+def carve_out_for(paths: list[str], repo: str) -> tuple[str, str] | None:
     for path in paths:
-        for pattern, why in CARVE_OUTS:
+        for pattern, why in carve_outs_for_repo(repo):
             if pattern.endswith("/"):
                 hit = path.startswith(pattern) or f"/{pattern}" in f"/{path}"
             else:
@@ -224,7 +251,7 @@ def assess(repo: str, number: int) -> Assessment:
         return found
     paths = [f["path"] for f in files]
 
-    carved = carve_out_for(paths)
+    carved = carve_out_for(paths, repo)
     if carved:
         path, why = carved
         found.checks.append(Check("no_carve_out", None, f"touches {path} — {why}"))

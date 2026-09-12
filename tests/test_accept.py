@@ -5,7 +5,8 @@ import json
 import pytest
 
 from myfleet.accept import (
-    CARVE_OUTS,
+    REPO_CARVE_OUTS,
+    SHARED_CARVE_OUTS,
     Assessment,
     Check,
     Verdict,
@@ -54,23 +55,24 @@ class TestCarveOuts:
         ],
     )
     def test_protected_paths_are_caught(self, path: str) -> None:
-        assert carve_out_for([path]) is not None
+        assert carve_out_for([path], "my-fleet") is not None
 
     def test_ordinary_code_is_not_caught(self) -> None:
-        assert carve_out_for(["src/myfleet/study_all.py", "README.md"]) is None
+        assert carve_out_for(["src/myfleet/study_all.py", "README.md"], "my-fleet") is None
 
     def test_one_carved_path_taints_an_otherwise_clean_diff(self) -> None:
-        assert carve_out_for(["README.md", "CLAUDE.md"]) is not None
+        assert carve_out_for(["README.md", "CLAUDE.md"], "my-fleet") is not None
 
     def test_the_gate_cannot_certify_itself(self) -> None:
         # The load-bearing one. If accept.py could ever accept a change to
         # accept.py, a single bad merge widens every merge after it -- the
         # failure compounds instead of staying contained.
-        assert carve_out_for(["src/myfleet/accept.py"]) is not None
+        assert carve_out_for(["src/myfleet/accept.py"], "my-fleet") is not None
 
     def test_every_carve_out_states_why(self) -> None:
         # The reason is shown to whoever gets handed the needs_human verdict.
-        assert all(why.strip() for _, why in CARVE_OUTS)
+        every = SHARED_CARVE_OUTS + tuple(p for v in REPO_CARVE_OUTS.values() for p in v)
+        assert all(why.strip() for _, why in every)
 
 
 class TestClosingIssue:
@@ -267,3 +269,44 @@ class TestAssess:
         found = assess("my-fleet", 1)
         assert found.verdict is Verdict.NEEDS_HUMAN
         assert "CLAUDE.md" in found.reason
+
+
+class TestPerRepoCarveOuts:
+    """#41: the carve-out list was shaped around my-fleet and missed the
+    equivalent gating code in every other repo."""
+
+    def test_my_coders_gating_code_is_carved_out(self) -> None:
+        # The regression. my-coder#30 changes coder.py -- where the PR-open
+        # action is gated -- and came back `accepted`, because the list only
+        # knew my-fleet's paths. It had to be held by hand, which is precisely
+        # the judgement call the gate exists to remove.
+        assert carve_out_for(["src/mycoder/coder.py"], "my-coder") is not None
+        assert carve_out_for(["src/mycoder/cli.py"], "my-coder") is not None
+
+    def test_my_guard_is_carved_out_wholesale(self) -> None:
+        # Not a file list: my-guard IS the policy engine, so any change in it
+        # can widen what every other tool is permitted to do.
+        assert carve_out_for(["src/myguard/rules.py"], "my-guard") is not None
+        assert carve_out_for(["src/myguard/ask.py"], "my-guard") is not None
+
+    def test_the_policy_contract_is_carved_out_in_core(self) -> None:
+        assert carve_out_for(["src/mythings/policy.py"], "my-things-core") is not None
+
+    def test_shared_carve_outs_apply_to_a_repo_not_in_the_map(self) -> None:
+        # The default must be the safe one. Most of the ~44 repos will never be
+        # listed, and forgetting to add one must not silently disable its
+        # carve-outs.
+        assert carve_out_for(["CLAUDE.md"], "my-flashcards") is not None
+        assert carve_out_for([".github/workflows/ci.yml"], "some-new-repo") is not None
+
+    def test_one_repos_gating_paths_do_not_leak_into_another(self) -> None:
+        # my-coder has no src/myfleet/, but if the lists were merged globally a
+        # same-named file anywhere would trip the wrong reason string.
+        found = carve_out_for(["src/myfleet/accept.py"], "my-coder")
+        assert found is None
+
+    def test_ordinary_code_in_a_gating_repo_is_still_mergeable(self) -> None:
+        # The carve-outs must not swallow the whole repo -- my-coder's session
+        # runner and my-fleet's study scripts are ordinary code.
+        assert carve_out_for(["src/mycoder/session.py"], "my-coder") is None
+        assert carve_out_for(["src/myfleet/study_all.py"], "my-fleet") is None
