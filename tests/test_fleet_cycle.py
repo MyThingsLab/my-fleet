@@ -227,6 +227,30 @@ def test_main_does_not_forward_allow_personal_token_by_default(
     assert "--allow-personal-token" not in dispatch_cmd
 
 
+def test_main_forwards_app_auth_flags_to_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _capture_runs(monkeypatch)
+    fc.main([
+        "--accounts", "/tmp/acct",
+        "--dispatch-execute", "--brief-count", "0",
+        "--app-id", "123",
+        "--app-installation-id", "456",
+        "--app-private-key", "/tmp/key.pem",
+    ])
+    (dispatch_cmd,) = [cmd for cmd, _ in calls if any("myfleet.fleet_dispatch" in c for c in cmd)]
+    assert dispatch_cmd[dispatch_cmd.index("--app-id") + 1] == "123"
+    assert dispatch_cmd[dispatch_cmd.index("--app-installation-id") + 1] == "456"
+    assert dispatch_cmd[dispatch_cmd.index("--app-private-key") + 1] == "/tmp/key.pem"
+
+
+def test_main_does_not_forward_app_auth_flags_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _capture_runs(monkeypatch)
+    fc.main(["--accounts", "/tmp/acct", "--brief-count", "0"])
+    (dispatch_cmd,) = [cmd for cmd, _ in calls if any("myfleet.fleet_dispatch" in c for c in cmd)]
+    assert "--app-id" not in dispatch_cmd
+    assert "--app-installation-id" not in dispatch_cmd
+    assert "--app-private-key" not in dispatch_cmd
+
+
 def test_execute_cycle_refuses_when_halt_marker_present(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
