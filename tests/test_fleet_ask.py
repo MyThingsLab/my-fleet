@@ -125,33 +125,70 @@ def test_enable_arms_the_env_every_subprocess_inherits(
     assert env["MYTHINGS_ASK_TIMEOUT"] == "75"
 
 
-def test_the_daemon_check_is_not_fooled_by_a_process_that_merely_mentions_it() -> None:
-    # The bug this pins: `pgrep -f "mytelegrambot run"` matches the pattern anywhere
-    # in a command line, so any shell, editor or grep that merely *mentions* the
-    # string counts as a live daemon. That false positive arms a channel nobody is
-    # listening on -- precisely the silent failure the preflight exists to prevent.
-    import subprocess
-    import sys
+@pytest.mark.parametrize(
+    "argv",
+    [
+        # A shell whose single argv string merely mentions the daemon. This is the
+        # case `pgrep -f "mytelegrambot run"` gets wrong, arming a channel nobody
+        # is listening on.
+        [b"/bin/sh", b"-c", b"mytelegrambot run &"],
+        [b"/usr/bin/python3", b"-c", b"import time; time.sleep(30)  # mytelegrambot run"],
+        [b"/usr/bin/grep", b"-r", b"mytelegrambot run", b"."],
+        # Right binary, wrong subcommand: `ask` is the short-lived client the
+        # daemon serves, not the daemon.
+        [b"/v/bin/python3", b"/v/bin/mytelegrambot", b"ask", b"--timeout", b"60"],
+        # `run` is there, but not as the argument following the binary.
+        [b"/v/bin/python3", b"/v/bin/mytelegrambot", b"--ledger", b"run"],
+        [],
+        [b""],
+    ],
+)
+def test_a_process_that_merely_mentions_the_daemon_is_not_the_daemon(argv: list[bytes]) -> None:
+    assert fleet_ask.is_daemon_argv(argv) is False
 
-    mentions_it = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(30)  # mytelegrambot run"]
-    )
-    try:
-        assert fleet_ask.daemon_is_running() is False
-    finally:
-        mentions_it.terminate()
-        mentions_it.wait()
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        # The venv console script: the kernel execs the interpreter named in the
+        # shebang, so argv[0] is python and the process name is "python3".
+        # Checking argv[0] (or `pgrep -x mytelegrambot`) would never find the
+        # daemon and would refuse to arm the channel with it running.
+        [b"/v/bin/python3", b"/v/bin/mytelegrambot", b"run"],
+        [b"/v/bin/python3", b"/v/bin/mytelegrambot", b"run", b"--testers-db", b".mythings/t.db"],
+        # A direct exec, and the module form.
+        [b"mytelegrambot", b"run"],
+        [b"/usr/bin/python3", b"-m", b"mytelegrambot", b"run"],
+    ],
+)
+def test_the_real_daemon_forms_are_recognised(argv: list[bytes]) -> None:
+    assert fleet_ask.is_daemon_argv(argv) is True
 
 
-def test_the_daemon_check_finds_the_real_console_script_form(tmp_path: Path) -> None:
-    # And the converse: it must find the real thing. A venv console script has an
-    # absolute-interpreter shebang, so the kernel execs python and the real argv is
-    #
-    #     ['/.../python3', '/.../mytelegrambot', 'run']
-    #
-    # argv[0] is the *interpreter*, and the process name is "python3". Checking
-    # argv[0] (or `pgrep -x mytelegrambot`) would never find the daemon and would
-    # refuse to arm the channel even with it running.
+def test_the_walk_reads_every_pid_and_survives_one_that_exits(tmp_path: Path) -> None:
+    # /proc's shape is all this walk assumes: numeric dirs holding a NUL-separated
+    # `cmdline`. Faking it keeps the test hermetic -- the real /proc would make the
+    # answer depend on whether this host happens to be running the daemon.
+    proc_root = tmp_path / "proc"
+    (proc_root / "1").mkdir(parents=True)
+    (proc_root / "1" / "cmdline").write_bytes(b"/sbin/init\x00")
+    (proc_root / "self").mkdir()  # non-numeric, skipped
+    (proc_root / "42").mkdir()  # no cmdline at all: exited mid-walk
+    assert fleet_ask.daemon_is_running(proc_root=proc_root) is False
+
+    (proc_root / "7").mkdir()
+    (proc_root / "7" / "cmdline").write_bytes(b"/v/bin/python3\x00/v/bin/mytelegrambot\x00run\x00")
+    assert fleet_ask.daemon_is_running(proc_root=proc_root) is True
+
+
+def test_the_console_script_form_in_a_real_proc_matches_what_the_predicate_expects(
+    tmp_path: Path,
+) -> None:
+    # The one thing a fake /proc cannot check: that a venv console script really
+    # does exec the interpreter, leaving the script path at argv[1]. Assert on
+    # *this* process's own cmdline rather than on `daemon_is_running()`, which
+    # would answer True for an unrelated live daemon and pass even if the
+    # predicate were broken (my-fleet#45).
     import subprocess
     import sys
     import time
@@ -162,12 +199,20 @@ def test_the_daemon_check_finds_the_real_console_script_form(tmp_path: Path) -> 
 
     proc = subprocess.Popen([str(fake_daemon), "run"])
     try:
+        cmdline = Path("/proc") / str(proc.pid) / "cmdline"
         # Popen returns before the child has finished exec'ing, so its argv is not
         # in /proc yet. Poll rather than sleep a fixed amount.
         deadline = time.monotonic() + 5
-        while time.monotonic() < deadline and not fleet_ask.daemon_is_running():
+        argv: list[bytes] = []
+        while time.monotonic() < deadline:
+            argv = cmdline.read_bytes().split(b"\0")
+            if fleet_ask.is_daemon_argv(argv):
+                break
             time.sleep(0.05)
-        assert fleet_ask.daemon_is_running() is True
+        assert fleet_ask.is_daemon_argv(argv) is True, argv
+        assert Path(argv[0].decode()).name != "mytelegrambot", (
+            "the kernel should have exec'd the interpreter, not the script"
+        )
     finally:
         proc.terminate()
         proc.wait()
