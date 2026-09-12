@@ -6,9 +6,8 @@ distinct candidate per available worker, then runs each as a `mycoder build`
 call under a different CLAUDE_CONFIG_DIR — so two subscriptions can work the
 fleet concurrently without touching each other's files. my-coder owns the
 worker role end to end (its own Workspace worktree, branch naming/resume,
-prompt, the single push + draft-PR side effect); this module picks which
-candidate to run and translates the result into the resume/recover outcomes
-below.
+prompt, the single push + PR side effect); this module picks which candidate to
+run and translates the result into the resume/recover outcomes below.
 
 Only "issue" candidates are dispatchable today; "scaffold" candidates (a
 not-yet-built tool) need MyScaffolder, which doesn't exist yet, so they're
@@ -22,8 +21,9 @@ a missing capability in another tool's repo the worker files that as an issue
 there and the issue is paused (not failed) until the blocker closes; after
 MAX_ATTEMPTS unresolved tries it's handed to a human.
 
-Each run ends at "draft PR opened", promoted to ready-for-review only once its
-tests-passed signal and CI both check out — never pushes to main, never merges.
+Each run ends at "PR opened" — ready for review when my-coder's own suite
+passed, draft when it did not. This module promotes nothing, never pushes to
+main, and never merges; the gate is the merge, and a human performs it.
 Defaults to --dry-run; pass --execute to actually spawn the headless sessions.
 
 Kill switch: `--abort` touches a HALT marker (.fleet-dispatch/HALT) and exits;
@@ -177,18 +177,20 @@ def _preflight_distinct_accounts(accounts: list[Account]) -> list[str]:
 
 
 
-# --- PR merge-readiness gate -----------------------------------------------
+# --- PR merge-readiness report ----------------------------------------------
 #
-# A pushed draft PR is promoted to "ready for review" only when my-coder itself
-# reported tests passing AND its CI actually goes green. Everything short of
-# that stays a draft and reports "needs_review" (a resumable outcome), so
-# "success" always means a human can pick the PR up to merge. Never merges --
-# the human always does that.
+# Observation only: nothing here changes a PR's state. "success" means my-coder
+# reported its suite passing AND CI independently agrees, so a human can pick
+# the PR up and merge it. Anything short of that reports "needs_review" (a
+# resumable outcome). The gate is the merge, and the human performs it.
 
 
 def _checks_state(org: str, repo: str, number: int) -> str:
     # Collapses gh's per-check buckets into one verdict:
-    #   'none'    -> no required checks are configured/reported
+    #   'none'    -> no required checks are configured/reported. Usually means
+    #                the repo's main is unprotected, or its protection lists no
+    #                required check: a green `test` run that branch protection
+    #                does not require is not something to merge on.
     #   'fail'    -> at least one required check failed or was cancelled
     #   'pending' -> nothing failed yet but something is still running/queued
     #   'skipped' -> a required check was skipped, so it produced no result
@@ -197,16 +199,17 @@ def _checks_state(org: str, repo: str, number: int) -> str:
     # Two things this deliberately does NOT do.
     #
     # It does not treat a skipped check as a pass. `ci.yml` skips while a PR is
-    # a draft, and my-coder opens drafts -- so every worker PR reported buckets
-    # of `skipping`, which fell through to 'pass' and got the PR promoted and
-    # logged as "(CI green)" for a suite that never ran (#32). Absence of
-    # evidence is not evidence, and answering that question is this function's
-    # entire job.
+    # a draft, and my-coder used to open every PR as one -- so every worker PR
+    # reported buckets of `skipping`, which fell through to 'pass' and got the
+    # PR promoted and logged as "(CI green)" for a suite that never ran (#32).
+    # A verified PR now opens ready, so this should no longer fire in practice;
+    # it stays because absence of evidence is not evidence, and answering that
+    # question is this function's entire job.
     #
     # It does not treat a skipped check as a failure either. Plenty of jobs skip
     # legitimately -- path filters, or the dependabot automerge job, which skips
-    # on every human PR. Flipping skipped to 'fail' would block every promotion
-    # in the fleet. The distinction that matters is whether the *required*
+    # on every human PR. Flipping skipped to 'fail' would report every worker
+    # PR in the fleet as broken. The distinction that matters is whether the *required*
     # checks ran, so ask gh for only those and judge nothing else.
     result = subprocess.run(
         ["gh", "pr", "checks", str(number), "--repo", f"{org}/{repo}", "--required", "--json", "bucket", "--jq", ".[].bucket"],
@@ -541,7 +544,7 @@ def _dispatch_one(
     # my-coder owns the whole worker role now: its own Workspace worktree,
     # branch naming/resume, prompt (searcher/researcher context, the blocker/
     # critical-bug protocol), running the target repo's tests, and the single
-    # push + draft-PR side effect. This just picks which candidate to run and
+    # push + PR side effect. This just picks which candidate to run and
     # translates the result into the outcome vocabulary _dispatch_decision
     # already knows.
     _fresh_base_ref(repo_path)  # best-effort fetch; see its docstring
@@ -617,7 +620,7 @@ def _dispatch_one(
             else ("failed", detail)
         )
     elif mycoder_outcome == "success":
-        # A draft PR is open; the readiness gate decides whether it's promoted.
+        # A PR is open; ask CI whether it's actually mergeable by a human.
         outcome, msg = _finalize_pr(
             org, repo, pr_number, tests_passed=tests_passed, ready_timeout=ready_timeout
         )
