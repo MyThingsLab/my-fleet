@@ -219,6 +219,12 @@ def _stage_dispatch(ctx: _Ctx) -> list[Stage]:
         cmd.append("--execute")
     if ctx.args.allow_personal_token:
         cmd.append("--allow-personal-token")
+    if ctx.args.app_id:
+        cmd += ["--app-id", ctx.args.app_id]
+    if ctx.args.app_installation_id:
+        cmd += ["--app-installation-id", ctx.args.app_installation_id]
+    if ctx.args.app_private_key:
+        cmd += ["--app-private-key", ctx.args.app_private_key]
     return [Stage("fleet-dispatch", cmd, mutating=False)]
 
 
@@ -611,6 +617,19 @@ def main(argv: list[str] | None = None) -> int:
         help="forwarded to fleet_dispatch.py: explicitly accept spawning workers "
         "on the ambient personal gh token instead of the GitHub App (see "
         "fleet_dispatch.py --help for why this is opt-in)",
+    )
+    parser.add_argument(
+        "--app-id",
+        help="forwarded to fleet_dispatch.py: GitHub App ID (combine with "
+        "--app-installation-id and --app-private-key)",
+    )
+    parser.add_argument(
+        "--app-installation-id",
+        help="forwarded to fleet_dispatch.py: GitHub App installation ID (see --app-id)",
+    )
+    parser.add_argument(
+        "--app-private-key",
+        help="forwarded to fleet_dispatch.py: path to the GitHub App's private key .pem (see --app-id)",
     )
     parser.add_argument(
         "--ask-human",
