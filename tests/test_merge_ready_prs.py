@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,7 @@ def _pr(number: int = 1, repo: str = "my-idea") -> PR:
         mergeable="MERGEABLE",
         merge_state="CLEAN",
         checks=[],
+        required_state="pass",
     )
 
 
@@ -37,9 +39,7 @@ class _Guard:
         from mythings.policy import PolicyResult
 
         self.asked.append(f"{action.payload['repo']}#{action.payload['number']}")
-        return PolicyResult(
-            self.decisions.pop(0), reason="human", rule="merge_needs_a_human"
-        )
+        return PolicyResult(self.decisions.pop(0), reason="human", rule="merge_needs_a_human")
 
 
 @pytest.fixture
@@ -117,9 +117,7 @@ def test_a_merge_that_fails_after_approval_does_not_strand_the_rest(
 
     monkeypatch.setattr(merge_ready_prs, "merge", flaky)
 
-    code = merge_by_asking(
-        [_pr(1), _pr(2)], _Guard(Decision.ALLOW, Decision.ALLOW), budget_s=60
-    )
+    code = merge_by_asking([_pr(1), _pr(2)], _Guard(Decision.ALLOW, Decision.ALLOW), budget_s=60)
 
     assert done == ["my-idea#2"]  # one stuck PR must not strand the queue
     assert code == 1  # but the run is honest about having failed
@@ -168,9 +166,7 @@ def test_the_ask_path_actually_parses_and_runs(
     # The human taps Deny, so nothing merges and no gh call is needed.
     monkeypatch.setattr(merge_ready_prs, "approve", lambda pr, guard: Decision.DENY)
 
-    code = merge_ready_prs.main(
-        ["--ask", "--ask-ledger", str(ledger), "--ask-budget-min", "1"]
-    )
+    code = merge_ready_prs.main(["--ask", "--ask-ledger", str(ledger), "--ask-budget-min", "1"])
 
     assert code == 0
     assert str(ledger) in capsys.readouterr().out  # it armed the channel we named
@@ -189,3 +185,103 @@ def test_the_ask_path_refuses_when_the_daemon_is_down(
 
     # Nobody would see the tap, so every merge would time out and deny. Refuse.
     assert merge_ready_prs.main(["--ask", "--ask-ledger", str(ledger)]) == 2
+
+
+# --- what "green" means (#37) ---------------------------------------------
+#
+# `ready` gates the bulk `--execute` path, so a PR that is wrongly ready is a
+# PR that merges with nobody looking. Before #37 this module decided that from
+# `statusCheckRollup` -- every check on the PR, with SKIPPED counted as fine --
+# rather than from the checks branch protection actually requires.
+
+
+def _pr_with(state: str) -> PR:
+    return PR(
+        repo="my-idea",
+        number=1,
+        title="a change",
+        is_draft=False,
+        mergeable="MERGEABLE",
+        merge_state="CLEAN",
+        checks=[],
+        required_state=state,
+    )
+
+
+def test_a_skipped_required_check_is_not_ready() -> None:
+    # The #32 regression, on the merge path. A skipped check produced no result;
+    # absence of evidence is not evidence.
+    pr = _pr_with("skipped")
+    assert not pr.ready
+    assert "skipped" in pr.reason_not_ready
+
+
+def test_an_unprotected_main_is_not_ready() -> None:
+    # 'none' means nothing is required, so nothing green here is evidence. This
+    # is not hypothetical -- my-fleet's own main was unprotected until #35.
+    pr = _pr_with("none")
+    assert not pr.ready
+    assert "unprotected" in pr.reason_not_ready
+
+
+def test_an_unestablished_state_is_not_ready() -> None:
+    # The default fails closed: never having asked must not read as a pass.
+    assert not _pr_with("unknown").ready
+
+
+def test_a_passing_required_check_is_ready() -> None:
+    assert _pr_with("pass").ready
+
+
+def test_green_optional_checks_cannot_make_a_pr_ready(monkeypatch) -> None:
+    # The other half of #37: the rollup is not the required set. A PR whose
+    # required check skipped, but whose optional jobs are all green, used to
+    # look perfectly mergeable.
+    pr = PR(
+        repo="my-idea",
+        number=1,
+        title="a change",
+        is_draft=False,
+        mergeable="MERGEABLE",
+        merge_state="CLEAN",
+        checks=[{"name": "lint", "conclusion": "SUCCESS"}],
+        required_state="skipped",
+    )
+    assert not pr.ready
+
+
+def test_a_disqualified_pr_costs_no_extra_api_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    # One _checks_state call per PR is a real cost on a 30-PR sweep, and a draft
+    # is already not ready however its checks look.
+    calls: list[int] = []
+    monkeypatch.setattr(
+        merge_ready_prs, "_checks_state", lambda org, repo, n: calls.append(n) or "pass"
+    )
+    monkeypatch.setattr(
+        merge_ready_prs,
+        "_run",
+        lambda argv: json.dumps(
+            [
+                {
+                    "number": 1,
+                    "title": "draft",
+                    "isDraft": True,
+                    "mergeable": "MERGEABLE",
+                    "mergeStateStatus": "CLEAN",
+                    "statusCheckRollup": [],
+                },
+                {
+                    "number": 2,
+                    "title": "ready",
+                    "isDraft": False,
+                    "mergeable": "MERGEABLE",
+                    "mergeStateStatus": "CLEAN",
+                    "statusCheckRollup": [],
+                },
+            ]
+        ),
+    )
+    prs = merge_ready_prs.list_open_prs("my-idea")
+    assert calls == [2]
+    assert prs[0].required_state == "unknown"
+    assert prs[1].required_state == "pass"
