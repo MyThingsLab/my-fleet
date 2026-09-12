@@ -58,12 +58,19 @@ unattended (in CI, or with no `my-telegram-bot` wired in); with
 `TelegramPolicy` wrapping it, an `ASK` becomes a real Allow/Deny prompt sent
 to Telegram and blocks for a reply instead.
 
-## Issue → PR → draft → ready → green → merge
+## Issue → PR → green → merge
 
-Every worker's PR follows the same shape (`fleet_dispatch`'s
-`_finalize_pr`): open **draft**, promote to **ready for review** only once
-the PR body's readiness checklist holds *and* CI is green, and never merge —
-a human always does that last step.
+Every worker's PR follows the same shape. my-coder opens it **ready for
+review** when its own in-worktree suite passed, and as a **draft** when
+nothing was verified. `fleet_dispatch._finalize_pr` then only *observes*:
+"success" means my-coder verified it and CI independently agrees, so a human
+can merge it. It promotes nothing and merges nothing.
+
+The gate is the merge, and a human always performs it. It used to be the
+promotion, which could not work: `ci.yml` skips required checks while a PR is
+a draft, so a PR born as a draft can never show a green check — and the old
+gate read that skip as a pass (#32). Opening ready is what makes CI run at
+all.
 
 ```bash
 # One full cycle, dry-run (default): reports what each step would do, no

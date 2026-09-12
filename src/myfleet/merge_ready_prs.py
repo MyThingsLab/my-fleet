@@ -7,9 +7,10 @@ run (report only); pass --execute to actually merge. Uses a real merge
 commit (`gh pr merge --merge`), matching the "Merge pull request #N from
 ..." shape already in every repo's history -- not squash, not rebase.
 
-Never touches a draft PR (those aren't "ready" yet -- see fleet_dispatch.py's
-own draft -> ready -> green -> merge shape) and never overrides a red/pending
-check or a real conflict.
+Never touches a draft PR (those aren't "ready" yet) and never overrides a
+red/pending check or a real conflict. Note that since my-coder started opening
+verified PRs ready rather than as drafts, worker PRs are eligible here --
+draft status is no longer what keeps them out of a bulk `--execute`.
 """
 
 from __future__ import annotations
