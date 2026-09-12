@@ -17,6 +17,7 @@ def pr(number: int, *, base: str = "main", head: str = "") -> PR:
         mergeable="MERGEABLE",
         merge_state="CLEAN",
         checks=[],
+        required_state="pass",
         base=base,
         head=head or f"branch-{number}",
     )

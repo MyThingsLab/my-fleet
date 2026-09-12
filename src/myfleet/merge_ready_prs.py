@@ -7,10 +7,21 @@ run (report only); pass --execute to actually merge. Uses a real merge
 commit (`gh pr merge --merge`), matching the "Merge pull request #N from
 ..." shape already in every repo's history -- not squash, not rebase.
 
-Never touches a draft PR (those aren't "ready" yet) and never overrides a
-red/pending check or a real conflict. Note that since my-coder started opening
-verified PRs ready rather than as drafts, worker PRs are eligible here --
-draft status is no longer what keeps them out of a bulk `--execute`.
+Never touches a draft PR and never overrides a red/pending check or a real
+conflict.
+
+"Every required check green" is answered by `fleet_dispatch._checks_state`, not
+by a second opinion held here. This module used to carry its own, reading
+`statusCheckRollup` -- every check on the PR -- and treating `SKIPPED` as
+acceptable. Both halves were wrong in the same direction: a required check that
+skipped produced no result, and a repo with an unprotected `main` reports a
+rollup full of green optional jobs while requiring nothing at all. #32 fixed
+that reasoning in fleet_dispatch; this had an untouched copy of it, on the one
+path in the fleet that actually merges (#37).
+
+Since #26, worker PRs open ready rather than draft, so draft status no longer
+keeps them out of a bulk `--execute` -- which is what made the stale copy worth
+fixing now rather than eventually.
 """
 
 from __future__ import annotations
@@ -28,6 +39,7 @@ from myguard.rules import MERGE_ACTION
 from mythings.policy import Action, Decision
 
 import myfleet.fleet_ask as fleet_ask
+from myfleet.fleet_dispatch import _checks_state
 
 ORG = "MyThingsLab"
 
@@ -41,11 +53,21 @@ class PR:
     mergeable: str  # MERGEABLE | CONFLICTING | UNKNOWN
     merge_state: str  # CLEAN | BLOCKED | DIRTY | UNSTABLE | ...
     checks: list[dict]
+    # Verdict from fleet_dispatch._checks_state: the one definition of "the
+    # required checks passed" in this repo. Defaults to 'unknown' so a PR whose
+    # state was never established is not ready -- the default has to fail
+    # closed, because the whole bug class here is absence of evidence being
+    # read as evidence.
+    required_state: str = "unknown"
     base: str = "main"
     head: str = ""
 
     @property
     def blocking_checks(self) -> list[str]:
+        # Display only -- deliberately NOT consulted by `ready`. It reads
+        # `statusCheckRollup`, which is every check on the PR rather than the
+        # ones branch protection requires, so it cannot answer the question that
+        # matters. Kept because naming the red job is useful in the report.
         blockers = []
         for check in self.checks:
             conclusion = check.get("conclusion") or check.get("status")
@@ -59,7 +81,7 @@ class PR:
             not self.is_draft
             and self.mergeable == "MERGEABLE"
             and self.merge_state == "CLEAN"
-            and not self.blocking_checks
+            and self.required_state == "pass"
         )
 
     @property
@@ -70,8 +92,14 @@ class PR:
             return "has merge conflicts"
         if self.mergeable == "UNKNOWN":
             return "mergeability not yet computed by GitHub (re-run in a moment)"
-        if self.blocking_checks:
-            return f"checks not green: {', '.join(self.blocking_checks)}"
+        if self.required_state != "pass":
+            return {
+                "skipped": "a required check was skipped, so it produced no result to merge on",
+                "none": "no required checks: main is unprotected, so no check here is evidence",
+                "fail": "a required check failed",
+                "pending": "a required check is still running",
+                "unknown": "required-check state was never established",
+            }.get(self.required_state, f"required checks report {self.required_state!r}")
         if self.merge_state != "CLEAN":
             return f"mergeStateStatus={self.merge_state}"
         return "not ready"
@@ -106,6 +134,14 @@ def list_open_prs(repo: str) -> list[PR]:
     )
     prs = []
     for obj in json.loads(raw):
+        # `gh pr list` cannot report required-check state, so it costs one extra
+        # call per PR. Only spend it on PRs that clear the free checks first --
+        # a draft or a conflicted PR is already not ready, and asking about its
+        # checks would change nothing.
+        disqualified = (
+            obj["isDraft"] or obj["mergeable"] != "MERGEABLE" or obj["mergeStateStatus"] != "CLEAN"
+        )
+        required_state = "unknown" if disqualified else _checks_state(ORG, repo, obj["number"])
         prs.append(
             PR(
                 repo=repo,
@@ -115,6 +151,7 @@ def list_open_prs(repo: str) -> list[PR]:
                 mergeable=obj["mergeable"],
                 merge_state=obj["mergeStateStatus"],
                 checks=obj.get("statusCheckRollup") or [],
+                required_state=required_state,
                 base=obj.get("baseRefName", "main"),
                 head=obj.get("headRefName", ""),
             )
