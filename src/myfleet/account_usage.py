@@ -67,7 +67,12 @@ def _run_usage_probe(config_dir: str, timeout: float = 30.0) -> str:
         timeout=timeout,
     )
     if proc.returncode != 0:
-        raise UsageCheckError(f"claude -p /usage failed for {config_dir}: {proc.stderr.strip()}")
+        # claude puts "Failed to authenticate: OAuth session expired" on stdout,
+        # not stderr, so reporting stderr alone gave an empty reason -- the whole
+        # diagnosis was thrown away at the one point it was available. See
+        # myfleet.preflight, which is what should catch this case first.
+        reason = (proc.stderr.strip() or proc.stdout.strip() or f"exit {proc.returncode}")[:200]
+        raise UsageCheckError(f"claude -p /usage failed for {config_dir}: {reason}")
     try:
         obj = json.loads(proc.stdout)
     except json.JSONDecodeError as exc:

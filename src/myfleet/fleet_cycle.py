@@ -29,10 +29,14 @@ passed through separately since it spawns billed headless sessions.
 
 --loop keeps re-running the cycle instead of exiting after one pass, meant for
 an always-on host (see the systemd unit alongside this file's PR). Each
-iteration re-derives the usable account pool via account_usage.select_accounts
-(polled on --account-recheck-min, not every iteration -- each poll is a real
-`claude -p /usage` call per account) and skips step 2 for that iteration if none
-are usable rather than stopping the loop. An iteration that dispatches nothing
+iteration re-derives the usable account pool -- first myfleet.preflight (can
+this account authenticate, and is the workspace trusted for it?), then
+account_usage.select_accounts on whatever survived -- and skips step 2 for that
+iteration if none are usable rather than stopping the loop. Both are polled on
+--account-recheck-min, not every iteration, since each is a real headless
+`claude` call per account. Preflight comes first because an account that cannot
+log in has no usage to read, and reporting it as "over the ceiling" describes a
+quota pause the fleet can wait out rather than a login it must be told about. An iteration that dispatches nothing
 backs off (doubling up to --max-backoff-min) before the next one; one that
 dispatches something resets the backoff. --max-duration-min and
 --max-cycle-budget-usd are optional caps for a bounded run (e.g. testing the
@@ -56,6 +60,7 @@ from mythings.ledger import Ledger
 
 import myfleet.account_usage as account_usage
 import myfleet.fleet_ask as fleet_ask
+import myfleet.preflight as preflight
 from myfleet.cycle_driver import Stage, import_or_die, run_command
 from myfleet.fleet_dispatch import DISPATCH_LEDGER, HALT_MARKER, _critical_halt_issues
 
@@ -475,6 +480,20 @@ def _next_backoff_s(
     return min(current_backoff_s * 2.0, max_backoff_s)
 
 
+def _record_preflight(ledger: Ledger, blocked: list[preflight.AccountPreflight]) -> None:
+    # Its own ledger kind, and the outcome names the actual condition. Recorded
+    # as a dispatch failure it would read as "a worker tried and did not finish",
+    # which is the thing this check exists to stop the fleet from reporting.
+    for result in blocked:
+        print(f"(account unusable — {result.outcome}: {result.config_dir}: {result.detail})")
+        ledger.record(
+            tool="fleet_cycle",
+            kind="preflight",
+            outcome=result.outcome,
+            detail=f"{result.config_dir}: {result.detail}",
+        )
+
+
 def _refresh_ask_channel(ledger: Ledger, *, timeout: int) -> None:
     # The daemon-liveness preflight in fleet_ask.enable() runs once, when the
     # channel is armed at startup. In --loop that isn't enough: a daemon that
@@ -522,6 +541,7 @@ def _run_loop(args: argparse.Namespace, py: str) -> int:
     backoff_s = idle_backoff_s
     last_account_check: float | None = None
     usable_accounts: list[str] = []
+    last_blocked: list[preflight.AccountPreflight] = []
     iteration = 0
 
     while True:
@@ -540,14 +560,23 @@ def _run_loop(args: argparse.Namespace, py: str) -> int:
             print(f"(--loop stopping: {stop_reason})")
             return 0
 
-        # account_usage.select_accounts spends one real `claude -p /usage` call
-        # per account, so this is polled on a cadence, not every iteration.
+        # Both probes spend a real headless `claude` call per account, so this is
+        # polled on a cadence, not every iteration.
         now = time.monotonic()
         if (
             last_account_check is None
             or (now - last_account_check) >= args.account_recheck_min * 60.0
         ):
-            usable, over = account_usage.select_accounts(pool, args.max_session_pct)
+            # Preflight first, and it filters the pool the usage probe sees. An
+            # account that cannot authenticate has no usage to read, and folding
+            # it into "over the ceiling" would report a quota problem the fleet
+            # can wait out instead of a login it has to be told about.
+            live, blocked = preflight.select_accounts(pool, WORKSPACE_ROOT)
+            _record_preflight(dispatch_ledger, blocked)
+            last_blocked = blocked
+            usable, over = account_usage.select_accounts(
+                [p.config_dir for p in live], args.max_session_pct
+            )
             usable_accounts = [u.config_dir for u in usable]
             last_account_check = now
             if over:
@@ -565,7 +594,14 @@ def _run_loop(args: argparse.Namespace, py: str) -> int:
         )
         skip_dispatch = args.skip_dispatch or not usable_accounts
         if not usable_accounts:
-            print("(no usable accounts this iteration — skipping dispatch, not stopping the loop)")
+            # Name the reason. "No usable accounts" alone reads like a quota
+            # pause that resolves itself, and an expired login never does.
+            reasons = ", ".join(f"{b.config_dir} {b.outcome}" for b in last_blocked)
+            print(
+                "(no usable accounts this iteration — skipping dispatch, not stopping the loop"
+                + (f"; blocked: {reasons}" if reasons else "")
+                + ")"
+            )
 
         entries_before = len(dispatch_ledger.read(tool="fleet_dispatch"))
         cycle_accounts = ",".join(usable_accounts) if usable_accounts else args.accounts
@@ -716,7 +752,23 @@ def main(argv: list[str] | None = None) -> int:
     if args.loop:
         return _run_loop(args, py)
 
-    _run_cycle(args, accounts=args.accounts, skip_dispatch=args.skip_dispatch, py=py)
+    accounts = args.accounts
+    skip_dispatch = args.skip_dispatch
+    # Only for a run that will actually spawn billed sessions: a dry run has no
+    # identity to prove and the probe is a real `claude` call per account.
+    if args.dispatch_execute and not skip_dispatch:
+        pool = [a.strip() for a in accounts.split(",") if a.strip()]
+        live, blocked = preflight.select_accounts(pool, WORKSPACE_ROOT)
+        _record_preflight(Ledger(DISPATCH_LEDGER), blocked)
+        if not live:
+            print(
+                "fleet_cycle: no account passed preflight — nothing was dispatched",
+                file=sys.stderr,
+            )
+            return 2
+        accounts = ",".join(p.config_dir for p in live)
+
+    _run_cycle(args, accounts=accounts, skip_dispatch=skip_dispatch, py=py)
 
     if not args.execute:
         print(

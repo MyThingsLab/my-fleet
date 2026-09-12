@@ -67,12 +67,18 @@ def test_main_execute_briefs_candidates_under_first_account(
     calls = _capture_runs(monkeypatch)
     monkeypatch.setattr(fc, "STUDY_ROOT", tmp_path)
     monkeypatch.setattr(fc, "_brief_candidates", lambda count: [4, 5][:count])
-    fc.main([
-        "--accounts", "/tmp/acct1,/tmp/acct2",
-        "--skip-dispatch", "--execute",
-        "--engine", "claude-cli",
-        "--brief-count", "2",
-    ])
+    fc.main(
+        [
+            "--accounts",
+            "/tmp/acct1,/tmp/acct2",
+            "--skip-dispatch",
+            "--execute",
+            "--engine",
+            "claude-cli",
+            "--brief-count",
+            "2",
+        ]
+    )
     briefs = [(cmd, env) for cmd, env in calls if cmd[0] == "myresearcher"]
     assert [cmd[cmd.index("--issue") + 1] for cmd, _ in briefs] == ["4", "5"]
     for cmd, env in briefs:
@@ -209,10 +215,16 @@ def test_main_forwards_allow_personal_token_to_dispatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = _capture_runs(monkeypatch)
-    fc.main([
-        "--accounts", "/tmp/acct",
-        "--dispatch-execute", "--allow-personal-token", "--brief-count", "0",
-    ])
+    fc.main(
+        [
+            "--accounts",
+            "/tmp/acct",
+            "--dispatch-execute",
+            "--allow-personal-token",
+            "--brief-count",
+            "0",
+        ]
+    )
     (dispatch_cmd,) = [cmd for cmd, _ in calls if any("myfleet.fleet_dispatch" in c for c in cmd)]
     assert "--allow-personal-token" in dispatch_cmd
     assert "--execute" in dispatch_cmd
@@ -229,13 +241,21 @@ def test_main_does_not_forward_allow_personal_token_by_default(
 
 def test_main_forwards_app_auth_flags_to_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = _capture_runs(monkeypatch)
-    fc.main([
-        "--accounts", "/tmp/acct",
-        "--dispatch-execute", "--brief-count", "0",
-        "--app-id", "123",
-        "--app-installation-id", "456",
-        "--app-private-key", "/tmp/key.pem",
-    ])
+    fc.main(
+        [
+            "--accounts",
+            "/tmp/acct",
+            "--dispatch-execute",
+            "--brief-count",
+            "0",
+            "--app-id",
+            "123",
+            "--app-installation-id",
+            "456",
+            "--app-private-key",
+            "/tmp/key.pem",
+        ]
+    )
     (dispatch_cmd,) = [cmd for cmd, _ in calls if any("myfleet.fleet_dispatch" in c for c in cmd)]
     assert dispatch_cmd[dispatch_cmd.index("--app-id") + 1] == "123"
     assert dispatch_cmd[dispatch_cmd.index("--app-installation-id") + 1] == "456"
@@ -296,9 +316,7 @@ def test_execute_cycle_refuses_when_critical_issue_open(
     assert "my-guard#9" in capsys.readouterr().out
 
 
-def test_dry_run_is_not_gated_by_halt(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_dry_run_is_not_gated_by_halt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     calls = _capture_runs(monkeypatch)
     marker = tmp_path / "HALT"
     marker.write_text("halted\n")
@@ -363,29 +381,59 @@ def _usable(pool: list[str]) -> tuple[list[SimpleNamespace], list[SimpleNamespac
     return [SimpleNamespace(config_dir=d) for d in pool], []
 
 
+def _preflight_ok(pool: list[str]) -> tuple[list[SimpleNamespace], list[SimpleNamespace]]:
+    return [SimpleNamespace(config_dir=d, outcome="ok", detail="") for d in pool], []
+
+
+@pytest.fixture(autouse=True)
+def _no_real_auth_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The preflight shells out to `claude` once per account. Every loop test
+    # would otherwise make real billed calls; the probe's own behaviour is
+    # covered in test_preflight.py.
+    monkeypatch.setattr(
+        fc.preflight, "select_accounts", lambda pool, workspace, **kw: _preflight_ok(pool)
+    )
+
+
 def test_loop_should_stop_none_when_no_caps() -> None:
-    assert fc._loop_should_stop(
-        elapsed_min=999, spent_usd=999, max_duration_min=None, max_cycle_budget_usd=None
-    ) is None
+    assert (
+        fc._loop_should_stop(
+            elapsed_min=999, spent_usd=999, max_duration_min=None, max_cycle_budget_usd=None
+        )
+        is None
+    )
 
 
 def test_loop_should_stop_on_duration_cap() -> None:
-    reason = fc._loop_should_stop(elapsed_min=10, spent_usd=0, max_duration_min=5, max_cycle_budget_usd=None)
+    reason = fc._loop_should_stop(
+        elapsed_min=10, spent_usd=0, max_duration_min=5, max_cycle_budget_usd=None
+    )
     assert reason is not None and "max-duration-min" in reason
 
 
 def test_loop_should_stop_on_budget_cap() -> None:
-    reason = fc._loop_should_stop(elapsed_min=0, spent_usd=5, max_duration_min=None, max_cycle_budget_usd=3)
+    reason = fc._loop_should_stop(
+        elapsed_min=0, spent_usd=5, max_duration_min=None, max_cycle_budget_usd=3
+    )
     assert reason is not None and "max-cycle-budget-usd" in reason
 
 
 def test_next_backoff_resets_to_idle_on_dispatch() -> None:
-    assert fc._next_backoff_s(240.0, dispatched=True, idle_backoff_s=60.0, max_backoff_s=1800.0) == 60.0
+    assert (
+        fc._next_backoff_s(240.0, dispatched=True, idle_backoff_s=60.0, max_backoff_s=1800.0)
+        == 60.0
+    )
 
 
 def test_next_backoff_doubles_and_caps_when_idle() -> None:
-    assert fc._next_backoff_s(10.0, dispatched=False, idle_backoff_s=60.0, max_backoff_s=1800.0) == 20.0
-    assert fc._next_backoff_s(1200.0, dispatched=False, idle_backoff_s=60.0, max_backoff_s=1800.0) == 1800.0
+    assert (
+        fc._next_backoff_s(10.0, dispatched=False, idle_backoff_s=60.0, max_backoff_s=1800.0)
+        == 20.0
+    )
+    assert (
+        fc._next_backoff_s(1200.0, dispatched=False, idle_backoff_s=60.0, max_backoff_s=1800.0)
+        == 1800.0
+    )
 
 
 def test_run_loop_stops_at_max_duration(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -393,7 +441,9 @@ def test_run_loop_stops_at_max_duration(monkeypatch: pytest.MonkeyPatch, tmp_pat
     clock = _FakeClock()
     monkeypatch.setattr(fc.time, "monotonic", clock.monotonic)
     monkeypatch.setattr(fc.time, "sleep", clock.sleep)
-    monkeypatch.setattr(fc, "_run_cycle", lambda *a, **k: None)  # never dispatches -> always backs off
+    monkeypatch.setattr(
+        fc, "_run_cycle", lambda *a, **k: None
+    )  # never dispatches -> always backs off
     monkeypatch.setattr(fc.account_usage, "select_accounts", lambda pool, pct: _usable(pool))
 
     result = fc._run_loop(_loop_ns(max_duration_min=5.0), "python3")
@@ -406,8 +456,12 @@ def test_run_loop_stops_at_budget_cap(monkeypatch: pytest.MonkeyPatch, tmp_path:
     monkeypatch.setattr(fc, "DISPATCH_LEDGER", ledger_path)
     ledger = fc.Ledger(ledger_path)
 
-    def fake_run_cycle(args: argparse.Namespace, *, accounts: str, skip_dispatch: bool, py: str) -> None:
-        ledger.record(tool="fleet_dispatch", kind="usage", outcome="success", detail="", cost_usd=2.0)
+    def fake_run_cycle(
+        args: argparse.Namespace, *, accounts: str, skip_dispatch: bool, py: str
+    ) -> None:
+        ledger.record(
+            tool="fleet_dispatch", kind="usage", outcome="success", detail="", cost_usd=2.0
+        )
 
     monkeypatch.setattr(fc, "_run_cycle", fake_run_cycle)
     monkeypatch.setattr(fc.account_usage, "select_accounts", lambda pool, pct: _usable(pool))
@@ -418,7 +472,9 @@ def test_run_loop_stops_at_budget_cap(monkeypatch: pytest.MonkeyPatch, tmp_path:
     assert spent >= 3.0
 
 
-def test_run_loop_skips_dispatch_when_no_usable_accounts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_run_loop_skips_dispatch_when_no_usable_accounts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     monkeypatch.setattr(fc, "DISPATCH_LEDGER", tmp_path / "ledger.jsonl")
 
     class _StopLoop(Exception):
@@ -426,7 +482,9 @@ def test_run_loop_skips_dispatch_when_no_usable_accounts(monkeypatch: pytest.Mon
 
     calls = []
 
-    def fake_run_cycle(args: argparse.Namespace, *, accounts: str, skip_dispatch: bool, py: str) -> None:
+    def fake_run_cycle(
+        args: argparse.Namespace, *, accounts: str, skip_dispatch: bool, py: str
+    ) -> None:
         calls.append((accounts, skip_dispatch))
         raise _StopLoop
 
@@ -451,19 +509,116 @@ def test_run_loop_rechecks_accounts_on_cadence_not_every_iteration(
 
     calls: list[list[str]] = []
 
-    def fake_select(pool: list[str], pct: int) -> tuple[list[SimpleNamespace], list[SimpleNamespace]]:
+    def fake_select(
+        pool: list[str], pct: int
+    ) -> tuple[list[SimpleNamespace], list[SimpleNamespace]]:
         calls.append(pool)
         return _usable(pool)
 
     monkeypatch.setattr(fc.account_usage, "select_accounts", fake_select)
 
     fc._run_loop(
-        _loop_ns(max_duration_min=1.0, idle_backoff_min=0.1, max_backoff_min=0.1, account_recheck_min=10.0),
+        _loop_ns(
+            max_duration_min=1.0,
+            idle_backoff_min=0.1,
+            max_backoff_min=0.1,
+            account_recheck_min=10.0,
+        ),
         "python3",
     )
     # 1 min of wall time at a 0.1 min (6s) fixed backoff is ~10 iterations, but
     # the 10-min recheck cadence never elapses within that -- one poll, not ten.
     assert len(calls) == 1
+
+
+def test_loop_preflights_accounts_before_reading_their_usage(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # An account that cannot authenticate has no usage to read, and must never
+    # reach the usage probe -- otherwise its failure is reported as a quota
+    # ceiling, which describes a pause the fleet can wait out rather than a
+    # login it has to be told about.
+    monkeypatch.setattr(fc, "DISPATCH_LEDGER", tmp_path / "ledger.jsonl")
+
+    class _StopLoop(Exception):
+        pass
+
+    dead = SimpleNamespace(
+        config_dir="/tmp/acct1", outcome="auth_expired", detail="OAuth session expired"
+    )
+    live = SimpleNamespace(config_dir="/tmp/acct2", outcome="ok", detail="")
+    monkeypatch.setattr(
+        fc.preflight, "select_accounts", lambda pool, workspace, **kw: ([live], [dead])
+    )
+
+    seen_by_usage: list[list[str]] = []
+
+    def fake_usage(pool: list[str], pct: int):
+        seen_by_usage.append(pool)
+        return _usable(pool)
+
+    monkeypatch.setattr(fc.account_usage, "select_accounts", fake_usage)
+
+    def fake_run_cycle(args, *, accounts: str, skip_dispatch: bool, py: str) -> None:
+        raise _StopLoop
+
+    monkeypatch.setattr(fc, "_run_cycle", fake_run_cycle)
+
+    with pytest.raises(_StopLoop):
+        fc._run_loop(_loop_ns(), "python3")
+
+    assert seen_by_usage == [["/tmp/acct2"]]
+
+
+def test_loop_records_a_blocked_account_as_preflight_not_a_session_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    ledger_path = tmp_path / "ledger.jsonl"
+    monkeypatch.setattr(fc, "DISPATCH_LEDGER", ledger_path)
+
+    class _StopLoop(Exception):
+        pass
+
+    dead = SimpleNamespace(
+        config_dir="/tmp/acct1", outcome="auth_expired", detail="OAuth session expired"
+    )
+    monkeypatch.setattr(fc.preflight, "select_accounts", lambda pool, workspace, **kw: ([], [dead]))
+    monkeypatch.setattr(fc.account_usage, "select_accounts", lambda pool, pct: ([], []))
+
+    def fake_run_cycle(args, *, accounts: str, skip_dispatch: bool, py: str) -> None:
+        raise _StopLoop
+
+    monkeypatch.setattr(fc, "_run_cycle", fake_run_cycle)
+
+    with pytest.raises(_StopLoop):
+        fc._run_loop(_loop_ns(), "python3")
+
+    entries = fc.Ledger(ledger_path).read(tool="fleet_cycle", kind="preflight")
+    assert [e.outcome for e in entries] == ["auth_expired"]
+    assert "/tmp/acct1" in entries[0].detail
+
+
+def test_loop_names_the_blocking_reason_instead_of_reporting_an_idle_fleet(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(fc, "DISPATCH_LEDGER", tmp_path / "ledger.jsonl")
+
+    class _StopLoop(Exception):
+        pass
+
+    dead = SimpleNamespace(
+        config_dir="/tmp/acct1", outcome="auth_expired", detail="OAuth session expired"
+    )
+    monkeypatch.setattr(fc.preflight, "select_accounts", lambda pool, workspace, **kw: ([], [dead]))
+    monkeypatch.setattr(fc.account_usage, "select_accounts", lambda pool, pct: ([], []))
+    monkeypatch.setattr(fc, "_run_cycle", lambda *a, **k: (_ for _ in ()).throw(_StopLoop()))
+
+    with pytest.raises(_StopLoop):
+        fc._run_loop(_loop_ns(), "python3")
+
+    out = capsys.readouterr().out
+    assert "no usable accounts" in out
+    assert "auth_expired" in out
 
 
 def _ask_loop_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
