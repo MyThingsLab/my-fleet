@@ -122,6 +122,24 @@ def test_main_execute_runs_mydashboard_render_after_mydocs(
     assert dashboard_cmd[dashboard_cmd.index("--workspace") + 1] == str(tmp_path)
 
 
+def test_mytester_stage_stays_local_only_even_under_execute(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # --execute flips every other stage from dry-run text to a real
+    # subprocess, but mytester's non-local-only mode tries to open a real
+    # "test: cover X" PR against every tool repo, every cycle -- a scope/rate
+    # decision nobody has made yet, not something --execute should switch on
+    # as a side effect of everything else going live.
+    calls = _capture_runs(monkeypatch)
+    monkeypatch.setattr(fc, "WORKSPACE_ROOT", tmp_path)
+    (tmp_path / "my-widget").mkdir()
+    (tmp_path / "my-widget" / "pyproject.toml").write_text("[project]\nname = 'my-widget'\n")
+    fc.main(["--accounts", "/tmp/acct", "--skip-dispatch", "--execute", "--brief-count", "0"])
+    tester_calls = [cmd for cmd, _ in calls if cmd[0] == "mytester"]
+    assert tester_calls
+    assert all("--local-only" in cmd for cmd in tester_calls)
+
+
 def test_main_skips_mydashboard_when_docs_site_clone_missing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
