@@ -265,40 +265,50 @@ def _wait_for_checks(
         time.sleep(min(interval, remaining))
 
 
-def _promote_pr(org: str, repo: str, number: int) -> None:
-    subprocess.run(["gh", "pr", "ready", str(number), "--repo", f"{org}/{repo}"], check=True)
-
-
 def _finalize_pr(
     org: str, repo: str, pr_number: int, *, tests_passed: bool | None, ready_timeout: float
 ) -> tuple[str, str]:
-    # Maps a freshly-pushed draft PR onto the existing outcome vocabulary so the
-    # resume/recover router still understands it: "success" ONLY when my-coder
-    # itself reported tests passing AND CI goes green (then it's promoted out of
-    # draft); otherwise "needs_review", which is resumable and leaves the draft
-    # for a human. Trusts my-coder's own structured tests_passed signal instead
-    # of re-parsing the PR body for a checked box -- a real measurement, not
-    # prose a session could get wrong without anyone noticing.
+    # Observes a freshly-pushed PR and maps it onto the outcome vocabulary the
+    # resume/recover router understands. It no longer PROMOTES anything.
+    #
+    # my-coder now opens the PR ready-for-review when its own in-worktree suite
+    # passed, and draft otherwise (#32). That resolves a circularity this
+    # function used to sit inside: promotion was gated on CI green, but `ci.yml`
+    # skips required checks while a PR is a draft, so the gate could only ever
+    # be satisfied by misreading a skip as a pass -- which is exactly what it
+    # did. Opening ready is what makes CI run at all, and the gate that matters
+    # moved to the merge, which a human always performs.
+    #
+    # So "success" here means: my-coder verified it, and CI independently agrees
+    # -- a PR a human can pick up and merge. Anything else is "needs_review",
+    # which is resumable. Trusts my-coder's structured tests_passed signal
+    # rather than re-parsing the PR body for a checked box: a real measurement,
+    # not prose a session could get wrong without anyone noticing.
     if not tests_passed:
-        return "needs_review", f"PR #{pr_number} left draft: my-coder did not report tests passing"
-    state = _wait_for_checks(org, repo, pr_number, timeout=ready_timeout)
-    if state == "pass":
-        _promote_pr(org, repo, pr_number)
-        return "success", f"PR #{pr_number} promoted to ready for review (CI green)"
-    if state == "none":
-        return "needs_review", f"PR #{pr_number} left draft: no CI checks to verify green"
-    if state == "skipped":
-        # The draft-first deadlock: `ci.yml` skips required checks while a PR is
-        # a draft, so a promotion gated on CI green can never be satisfied from
-        # inside a draft. Say that plainly instead of promoting on a non-result
-        # -- see #32 for the three ways out of the circularity.
         return (
             "needs_review",
-            f"PR #{pr_number} left draft: required CI was skipped (never ran), not green",
+            f"PR #{pr_number} left draft: my-coder did not report tests passing",
+        )
+    state = _wait_for_checks(org, repo, pr_number, timeout=ready_timeout)
+    if state == "pass":
+        return "success", f"PR #{pr_number} ready for review, CI green -- awaiting a human merge"
+    if state == "none":
+        return "needs_review", f"PR #{pr_number} not merged: no CI checks to verify green"
+    if state == "skipped":
+        # Should be unreachable now that a verified PR is opened ready: a
+        # required check only skips on a draft. Kept because reaching it means
+        # the ready-on-verified path silently regressed, and saying so beats
+        # falling through to a misleading verdict.
+        return (
+            "needs_review",
+            f"PR #{pr_number} not merged: required CI was skipped (never ran), not green",
         )
     if state == "pending":
-        return "needs_review", f"PR #{pr_number} left draft: CI still running after {ready_timeout:.0f}s"
-    return "needs_review", f"PR #{pr_number} left draft: CI failing"
+        return (
+            "needs_review",
+            f"PR #{pr_number} not merged: CI still running after {ready_timeout:.0f}s",
+        )
+    return "needs_review", f"PR #{pr_number} not merged: CI failing"
 
 
 # --- resume / recover loop -------------------------------------------------
@@ -736,9 +746,11 @@ def main(argv: list[str] | None = None) -> int:
         "--ready-timeout",
         type=float,
         default=600.0,
-        help="seconds to wait for a pushed PR's CI to go green before promoting "
-        "it from draft to ready-for-review; on timeout the PR is left a draft "
-        "(default: 600). 0 checks once and does not wait.",
+        help="seconds to wait for a pushed PR's CI to settle before recording "
+        "the dispatch outcome; on timeout the run is reported needs_review and "
+        "the PR is left for a human (default: 600). 0 checks once and does not "
+        "wait. Nothing is promoted or merged either way -- my-coder opens the "
+        "PR ready when its own suite passed, and a human always merges.",
     )
     parser.add_argument(
         "--session-timeout-s",

@@ -495,29 +495,35 @@ def test_wait_for_checks_returns_pending_on_timeout(monkeypatch) -> None:
 
 
 def test_finalize_pr_needs_review_when_tests_not_passed(monkeypatch) -> None:
-    # Trusts my-coder's own structured tests_passed signal directly -- never
-    # promoted without it, regardless of CI state.
-    promoted = []
+    # Trusts my-coder's own structured tests_passed signal directly -- never a
+    # success without it, regardless of CI state.
     monkeypatch.setattr(fd, "_checks_state", lambda *a, **k: "pass")
-    monkeypatch.setattr(fd, "_promote_pr", lambda *a, **k: promoted.append(a))
 
     outcome, msg = fd._finalize_pr("org", "repo", 42, tests_passed=None, ready_timeout=0)
 
     assert outcome == "needs_review"
     assert "did not report tests passing" in msg
-    assert promoted == []
 
 
-def test_finalize_pr_promotes_when_tests_passed_and_ci_green(monkeypatch) -> None:
-    promoted = []
+def test_finalize_pr_succeeds_when_tests_passed_and_ci_green(monkeypatch) -> None:
     monkeypatch.setattr(fd, "_checks_state", lambda *a, **k: "pass")
-    monkeypatch.setattr(fd, "_promote_pr", lambda org, repo, number: promoted.append(number))
 
     outcome, msg = fd._finalize_pr("org", "repo", 42, tests_passed=True, ready_timeout=0)
 
     assert outcome == "success"
-    assert "promoted to ready" in msg
-    assert promoted == [42]
+    assert "awaiting a human merge" in msg
+
+
+def test_finalize_pr_never_promotes_or_merges_anything() -> None:
+    # The gate moved to the merge (#32). my-coder opens the PR ready when its
+    # own suite passed, so there is nothing left here to promote -- and a human
+    # has always been the only thing that merges. Asserted structurally: this
+    # module must not retain a promotion helper that a later change could
+    # quietly start calling again.
+    assert not hasattr(fd, "_promote_pr")
+    source = Path(fd.__file__).read_text()
+    assert "gh pr ready" not in source
+    assert "gh pr merge" not in source
 
 
 def test_finalize_pr_needs_review_when_ci_fails(monkeypatch) -> None:
@@ -534,20 +540,20 @@ def test_finalize_pr_needs_review_when_no_ci_checks(monkeypatch) -> None:
     assert "no CI checks" in msg
 
 
-def test_finalize_pr_never_promotes_on_a_skipped_check(monkeypatch) -> None:
+def test_finalize_pr_never_succeeds_on_a_skipped_check(monkeypatch) -> None:
     # The regression #32 is about. `ci.yml` skips required checks while a PR is
-    # a draft and my-coder only ever opens drafts, so EVERY worker PR reached
+    # a draft and my-coder used to open only drafts, so EVERY worker PR reached
     # this path with skipped checks -- and was promoted to ready and recorded
     # `success` with the detail "(CI green)" for a suite that never ran. The
     # fleet's autonomous success signal was a false green by construction.
-    promoted = []
+    #
+    # Unreachable now that a verified PR is opened ready, which is the point:
+    # if this ever fires again, the ready-on-verified path has regressed.
     monkeypatch.setattr(fd, "_checks_state", lambda *a, **k: "skipped")
-    monkeypatch.setattr(fd, "_promote_pr", lambda org, repo, number: promoted.append(number))
 
     outcome, msg = fd._finalize_pr("org", "repo", 42, tests_passed=True, ready_timeout=0)
 
     assert outcome == "needs_review"
-    assert promoted == [], "a skipped check must never promote a PR"
     assert "skipped" in msg and "not green" in msg
 
 
