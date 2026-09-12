@@ -188,12 +188,28 @@ def _preflight_distinct_accounts(accounts: list[Account]) -> list[str]:
 
 def _checks_state(org: str, repo: str, number: int) -> str:
     # Collapses gh's per-check buckets into one verdict:
-    #   'none'    -> no CI checks are configured/reported (can't verify green)
-    #   'fail'    -> at least one check failed or was cancelled
+    #   'none'    -> no required checks are configured/reported
+    #   'fail'    -> at least one required check failed or was cancelled
     #   'pending' -> nothing failed yet but something is still running/queued
-    #   'pass'    -> every check settled successfully (or was skipped)
+    #   'skipped' -> a required check was skipped, so it produced no result
+    #   'pass'    -> every required check settled successfully
+    #
+    # Two things this deliberately does NOT do.
+    #
+    # It does not treat a skipped check as a pass. `ci.yml` skips while a PR is
+    # a draft, and my-coder opens drafts -- so every worker PR reported buckets
+    # of `skipping`, which fell through to 'pass' and got the PR promoted and
+    # logged as "(CI green)" for a suite that never ran (#32). Absence of
+    # evidence is not evidence, and answering that question is this function's
+    # entire job.
+    #
+    # It does not treat a skipped check as a failure either. Plenty of jobs skip
+    # legitimately -- path filters, or the dependabot automerge job, which skips
+    # on every human PR. Flipping skipped to 'fail' would block every promotion
+    # in the fleet. The distinction that matters is whether the *required*
+    # checks ran, so ask gh for only those and judge nothing else.
     result = subprocess.run(
-        ["gh", "pr", "checks", str(number), "--repo", f"{org}/{repo}", "--json", "bucket", "--jq", ".[].bucket"],
+        ["gh", "pr", "checks", str(number), "--repo", f"{org}/{repo}", "--required", "--json", "bucket", "--jq", ".[].bucket"],
         capture_output=True, text=True,
     )
     buckets = [b for b in result.stdout.split() if b]
@@ -203,6 +219,11 @@ def _checks_state(org: str, repo: str, number: int) -> str:
         return "fail"
     if any(b == "pending" for b in buckets):
         return "pending"
+    # `any`, not `all`: a required check that skipped produced no result, and a
+    # sibling check going green is not evidence for it. Branch protection would
+    # hold the merge on that missing result anyway.
+    if any(b == "skipping" for b in buckets):
+        return "skipped"
     return "pass"
 
 
@@ -229,7 +250,9 @@ def _wait_for_checks(
     org: str, repo: str, number: int, *, timeout: float, interval: float = 15.0
 ) -> str:
     # Polls until CI settles or `timeout` seconds elapse. Returns the terminal
-    # state ('pass'/'fail'/'none'), or 'pending' if it timed out still running.
+    # state ('pass'/'fail'/'none'/'skipped'), or 'pending' if it timed out still
+    # running. 'skipped' is terminal: a skipped check will not start later, so
+    # waiting on it would just burn the whole timeout to reach the same answer.
     # timeout=0 degenerates to a single check -- the shape unit tests exercise.
     deadline = time.monotonic() + timeout
     while True:
@@ -264,6 +287,15 @@ def _finalize_pr(
         return "success", f"PR #{pr_number} promoted to ready for review (CI green)"
     if state == "none":
         return "needs_review", f"PR #{pr_number} left draft: no CI checks to verify green"
+    if state == "skipped":
+        # The draft-first deadlock: `ci.yml` skips required checks while a PR is
+        # a draft, so a promotion gated on CI green can never be satisfied from
+        # inside a draft. Say that plainly instead of promoting on a non-result
+        # -- see #32 for the three ways out of the circularity.
+        return (
+            "needs_review",
+            f"PR #{pr_number} left draft: required CI was skipped (never ran), not green",
+        )
     if state == "pending":
         return "needs_review", f"PR #{pr_number} left draft: CI still running after {ready_timeout:.0f}s"
     return "needs_review", f"PR #{pr_number} left draft: CI failing"

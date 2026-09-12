@@ -446,10 +446,20 @@ def test_main_resumes_or_skips_by_prior_attempt(tmp_path: Path, monkeypatch) -> 
     [
         ("", "none"),
         ("pass\npass", "pass"),
-        ("pass\nskipping", "pass"),
+        # A skipped REQUIRED check is not a pass (#32). These are the real
+        # bucket values gh reported for draft PR my-things-core#152, whose
+        # `test` job `ci.yml` skips precisely because the PR is a draft --
+        # which is the state every my-coder PR is born in.
+        ("skipping", "skipped"),
+        ("skipping\nskipping", "skipped"),
+        # ...and not even alongside a green sibling: the skipped check still
+        # produced no result of its own.
+        ("pass\nskipping", "skipped"),
         ("pass\npending", "pending"),
         ("pass\nfail", "fail"),
         ("cancel", "fail"),
+        # Failure and cancellation still outrank a skip.
+        ("skipping\nfail", "fail"),
     ],
 )
 def test_checks_state_collapses_buckets(monkeypatch, buckets: str, expected: str) -> None:
@@ -459,6 +469,23 @@ def test_checks_state_collapses_buckets(monkeypatch, buckets: str, expected: str
         lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=buckets, stderr=""),
     )
     assert fd._checks_state("org", "repo", 1) == expected
+
+
+def test_checks_state_asks_only_for_required_checks(monkeypatch) -> None:
+    # The discriminator for #32. A repo's optional jobs skip all the time --
+    # the dependabot `automerge` job skips on every human PR -- so "was it
+    # skipped" is only a usable signal once the question is narrowed to the
+    # checks branch protection actually requires.
+    seen: list[list[str]] = []
+
+    def fake_run(argv, *a, **k):
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="pass", stderr="")
+
+    monkeypatch.setattr(fd.subprocess, "run", fake_run)
+    fd._checks_state("org", "repo", 1)
+
+    assert "--required" in seen[0]
 
 
 def test_wait_for_checks_returns_pending_on_timeout(monkeypatch) -> None:
@@ -505,6 +532,37 @@ def test_finalize_pr_needs_review_when_no_ci_checks(monkeypatch) -> None:
     outcome, msg = fd._finalize_pr("org", "repo", 42, tests_passed=True, ready_timeout=0)
     assert outcome == "needs_review"
     assert "no CI checks" in msg
+
+
+def test_finalize_pr_never_promotes_on_a_skipped_check(monkeypatch) -> None:
+    # The regression #32 is about. `ci.yml` skips required checks while a PR is
+    # a draft and my-coder only ever opens drafts, so EVERY worker PR reached
+    # this path with skipped checks -- and was promoted to ready and recorded
+    # `success` with the detail "(CI green)" for a suite that never ran. The
+    # fleet's autonomous success signal was a false green by construction.
+    promoted = []
+    monkeypatch.setattr(fd, "_checks_state", lambda *a, **k: "skipped")
+    monkeypatch.setattr(fd, "_promote_pr", lambda org, repo, number: promoted.append(number))
+
+    outcome, msg = fd._finalize_pr("org", "repo", 42, tests_passed=True, ready_timeout=0)
+
+    assert outcome == "needs_review"
+    assert promoted == [], "a skipped check must never promote a PR"
+    assert "skipped" in msg and "not green" in msg
+
+
+def test_wait_for_checks_treats_skipped_as_terminal(monkeypatch) -> None:
+    # A skipped check will not start later, so polling it to the deadline would
+    # burn the full --ready-timeout only to return the same answer.
+    calls = []
+
+    def state(*a, **k):
+        calls.append(1)
+        return "skipped"
+
+    monkeypatch.setattr(fd, "_checks_state", state)
+    assert fd._wait_for_checks("org", "repo", 1, timeout=600) == "skipped"
+    assert len(calls) == 1
 
 
 def test_abort_arms_halt_marker_without_needing_accounts(tmp_path: Path, monkeypatch) -> None:
