@@ -12,6 +12,8 @@ Three verdicts, and the distinction between the last two matters:
 
   ACCEPTED    -> every check passed; a caller with --execute may merge it
   REJECTED    -> a check failed on evidence. The PR is wrong, not unclear.
+                 Reserved for facts, not estimates: a draft is REJECTED, an
+                 oversized diff is not (the size label may be the wrong half).
   NEEDS_HUMAN -> no verdict is available: a check could not be evaluated, or
                  the diff touches something this gate is not allowed to clear.
 
@@ -245,11 +247,23 @@ def assess(repo: str, number: int) -> Assessment:
     labels = {obj["name"] for obj in json.loads(out)["labels"]}
     bound = next((SIZE_BOUNDS[s] for s in SIZE_BOUNDS if s in labels), DEFAULT_BOUND)
     churn = sum(f["additions"] + f["deletions"] for f in files)
+    # Overshooting the bound is None, never False. A `size:` label is an estimate
+    # made before the work existed, so a diff exceeding it is evidence the
+    # estimate was wrong at least as often as it is evidence the diff is. The
+    # first real corpus run rejected two genuinely good PRs this way -- a new
+    # seam with tests and an ADR is simply not `size:S`, and the label was the
+    # thing at fault. REJECTED would throw that work away; NEEDS_HUMAN routes it
+    # to the one party who can tell the two cases apart.
     found.checks.append(
         Check(
             "diff_in_scope",
-            churn <= bound,
-            f"{churn} lines changed against a {bound}-line bound for #{issue}",
+            True if churn <= bound else None,
+            f"{churn} lines changed against a {bound}-line bound for #{issue}"
+            + (
+                ""
+                if churn <= bound
+                else " — bigger than the label predicted, so scope needs a look"
+            ),
         )
     )
     return found

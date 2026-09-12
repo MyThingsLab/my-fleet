@@ -177,7 +177,12 @@ class TestAssess:
         )
         assert assess("my-fleet", 1).verdict is Verdict.REJECTED
 
-    def test_an_oversized_diff_is_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_an_oversized_diff_needs_a_human_rather_than_being_thrown_away(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A size: label is an estimate made before the work existed. Exceeding it
+        # is as likely to mean the estimate was wrong as that the diff is, and
+        # only a human can tell those apart -- so escalate, never reject.
         monkeypatch.setattr(
             "myfleet.accept._gh",
             self._gh_returning(
@@ -194,7 +199,9 @@ class TestAssess:
             ),
         )
         monkeypatch.setattr("myfleet.accept._checks_state", lambda *a: "pass")
-        assert assess("my-fleet", 1).verdict is Verdict.REJECTED
+        found = assess("my-fleet", 1)
+        assert found.verdict is Verdict.NEEDS_HUMAN
+        assert "bigger than the label predicted" in found.reason
 
     def test_a_pr_closing_nothing_needs_a_human(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Without a stated intent there is no scope to compare the diff against,
@@ -234,6 +241,8 @@ class TestAssess:
             ),
         )
         monkeypatch.setattr("myfleet.accept._checks_state", lambda *a: "pass")
+        # Draft stays a hard REJECTED. Unlike an oversized diff, this is not an
+        # estimate that might have been wrong -- the author said it isn't done.
         assert assess("my-fleet", 1).verdict is Verdict.REJECTED
 
     def test_a_carved_path_is_never_accepted_however_green(
