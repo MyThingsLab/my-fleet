@@ -56,9 +56,12 @@ from mythings.github import app_installation_org, github_app_token
 from mythings.ledger import Ledger
 
 import myfleet.fleet_ask as fleet_ask
+from myfleet.workspace import ROOT_ENV, fleet_root
 
-# Climbs myfleet/<file>.py -> src -> my-fleet -> MyThingsLab/ (the fleet root).
-WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
+# Climbs myfleet/<file>.py -> src -> my-fleet -> MyThingsLab/ (the fleet root),
+# unless $MYTHINGS_WORKSPACE_ROOT says otherwise -- the climb lands in a scratch
+# dir when this module is imported from a Workspace worktree (#48).
+WORKSPACE_ROOT = fleet_root(__file__)
 DISPATCH_LEDGER = WORKSPACE_ROOT / ".fleet-dispatch" / "ledger.jsonl"
 TRANSCRIPTS_DIR = WORKSPACE_ROOT / ".fleet-dispatch" / "transcripts"
 # The kill switch: a marker file, not a signal or a flag a running process has
@@ -815,6 +818,13 @@ def main(argv: list[str] | None = None) -> int:
             f"(--max-daily-usd default: ${args.max_daily_usd:.2f})"
         )
         return 0
+
+    # Same inheritance, one step earlier: a worker runs inside a Workspace
+    # worktree, where climbing out of `__file__` lands in the scratch dir rather
+    # than the fleet root (#48). This process is not in a worktree, so say where
+    # the root is instead of letting each worker re-derive it from a path that
+    # moved -- including the ledger `mytelegrambot ask` polls for the reply.
+    os.environ.setdefault(ROOT_ENV, str(WORKSPACE_ROOT))
 
     if args.ask_human:
         # Armed in this process's environment, which every headless worker inherits
