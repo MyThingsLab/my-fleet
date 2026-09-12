@@ -405,6 +405,65 @@ def test_gh_json_returns_none_on_failure(monkeypatch: pytest.MonkeyPatch) -> Non
     assert fc._gh_json(["issue", "list"]) is None
 
 
+# ---- heartbeats (#28) -------------------------------------------------------
+
+
+def test_build_tick_records_only_the_build_heartbeat(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _capture_runs(monkeypatch)
+    ledger_path = tmp_path / "ledger.jsonl"
+    monkeypatch.setattr(fc, "DISPATCH_LEDGER", ledger_path)
+    monkeypatch.setattr(fc, "WORKSPACE_ROOT", tmp_path)
+    fc.main(
+        ["--accounts", "/tmp/acct", "--execute", "--brief-count", "0", "--skip-bookkeeping"]
+    )
+    ticks = [e.data.get("tick") for e in fc.Ledger(ledger_path).read(tool="fleet_cycle", kind="heartbeat")]
+    assert ticks == ["build"]
+
+
+def test_bookkeeping_tick_records_only_the_bookkeeping_heartbeat(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _capture_runs(monkeypatch)
+    ledger_path = tmp_path / "ledger.jsonl"
+    monkeypatch.setattr(fc, "DISPATCH_LEDGER", ledger_path)
+    monkeypatch.setattr(fc, "WORKSPACE_ROOT", tmp_path)
+    fc.main(["--accounts", "/tmp/acct", "--skip-dispatch", "--execute", "--brief-count", "0"])
+    ticks = [e.data.get("tick") for e in fc.Ledger(ledger_path).read(tool="fleet_cycle", kind="heartbeat")]
+    assert ticks == ["bookkeeping"]
+
+
+def test_a_full_cycle_records_both_heartbeats(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _capture_runs(monkeypatch)
+    ledger_path = tmp_path / "ledger.jsonl"
+    monkeypatch.setattr(fc, "DISPATCH_LEDGER", ledger_path)
+    monkeypatch.setattr(fc, "WORKSPACE_ROOT", tmp_path)
+    fc.main(["--accounts", "/tmp/acct", "--execute", "--brief-count", "0"])
+    ticks = {e.data.get("tick") for e in fc.Ledger(ledger_path).read(tool="fleet_cycle", kind="heartbeat")}
+    assert ticks == {"build", "bookkeeping"}
+
+
+def test_halted_cycle_still_records_a_heartbeat(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Heartbeats prove the process reached this line at all -- a run that was
+    # legitimately halted (kill switch, critical issue) is still alive, not
+    # the silent-timer failure mode #28's heartbeat exists to catch.
+    calls = _capture_runs(monkeypatch)
+    ledger_path = tmp_path / "ledger.jsonl"
+    monkeypatch.setattr(fc, "DISPATCH_LEDGER", ledger_path)
+    marker = tmp_path / "HALT"
+    marker.write_text("halted\n")
+    monkeypatch.setattr(fc, "HALT_MARKER", marker)
+    fc.main(["--accounts", "/tmp/acct", "--execute", "--skip-dispatch", "--brief-count", "0"])
+    assert calls == []
+    ticks = {e.data.get("tick") for e in fc.Ledger(ledger_path).read(tool="fleet_cycle", kind="heartbeat")}
+    assert ticks == {"bookkeeping"}
+
+
 # ---- --loop ----------------------------------------------------------------
 
 
