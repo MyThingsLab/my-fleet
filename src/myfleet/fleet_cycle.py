@@ -268,6 +268,14 @@ def _stage_researcher(ctx: _Ctx) -> list[Stage]:
 
 
 def _stage_tester(ctx: _Ctx) -> list[Stage]:
+    # Always --local-only for now, --execute or not: this stage runs against
+    # *every* tool repo, every 6-hourly cycle, and --local-only is the only
+    # thing standing between that and my-tester opening a real "test: cover
+    # X" draft PR against nearly the whole fleet on every single tick. That's
+    # a rate-limiting/scope decision (how many, how often) nobody has made
+    # yet, not something --execute should switch on as a side effect of also
+    # meaning "run everything else for real". Revisit deliberately, with a
+    # cap on how many of these run per cycle, before dropping this.
     stages = []
     for repo in tool_repos(WORKSPACE_ROOT):
         cmd = [
@@ -277,9 +285,8 @@ def _stage_tester(ctx: _Ctx) -> list[Stage]:
             str(WORKSPACE_ROOT / repo),
             "--engine",
             ctx.args.engine,
+            "--local-only",
         ]
-        if not ctx.args.execute:
-            cmd.append("--local-only")
         stages.append(Stage("mytester", cmd, mutating=False))
     return stages
 
