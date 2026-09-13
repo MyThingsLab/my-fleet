@@ -226,6 +226,9 @@ def _stage_dispatch(ctx: _Ctx) -> list[Stage]:
     if ctx.skip_dispatch:
         return []
     cmd = [ctx.py, "-m", "myfleet.fleet_dispatch", "--accounts", ctx.accounts]
+    provider = getattr(ctx.args, "provider", "claude")
+    if provider != "claude":
+        cmd += ["--provider", provider]
     if ctx.args.dispatch_execute:
         cmd.append("--execute")
     if ctx.args.allow_personal_token:
@@ -614,11 +617,19 @@ def _run_loop(args: argparse.Namespace, py: str) -> int:
             # account that cannot authenticate has no usage to read, and folding
             # it into "over the ceiling" would report a quota problem the fleet
             # can wait out instead of a login it has to be told about.
-            live, blocked = preflight.select_accounts(pool, WORKSPACE_ROOT)
+            provider = getattr(args, "provider", "claude")
+            preflight_kw: dict[str, object] = {}
+            usage_kw: dict[str, object] = {}
+            if provider != "claude":
+                preflight_kw["provider"] = provider
+                usage_kw["provider"] = provider
+            live, blocked = preflight.select_accounts(
+                pool, WORKSPACE_ROOT, **preflight_kw
+            )
             _record_preflight(dispatch_ledger, blocked)
             last_blocked = blocked
             usable, over = account_usage.select_accounts(
-                [p.config_dir for p in live], args.max_session_pct
+                [p.config_dir for p in live], args.max_session_pct, **usage_kw
             )
             usable_accounts = [u.config_dir for u in usable]
             last_account_check = now
@@ -782,6 +793,12 @@ def main(argv: list[str] | None = None) -> int:
         default=1,
         help="max parallel tools to run concurrently within a single wave (default: %(default)s)",
     )
+    parser.add_argument(
+        "--provider",
+        choices=["claude", "gemini"],
+        default="claude",
+        help="model provider for worker sessions and usage tracking (default: %(default)s)",
+    )
     args = parser.parse_args(argv)
 
     if args.ask_human:
@@ -808,7 +825,10 @@ def main(argv: list[str] | None = None) -> int:
     # identity to prove and the probe is a real `claude` call per account.
     if args.dispatch_execute and not skip_dispatch:
         pool = [a.strip() for a in accounts.split(",") if a.strip()]
-        live, blocked = preflight.select_accounts(pool, WORKSPACE_ROOT)
+        preflight_kw = {"provider": args.provider} if args.provider != "claude" else {}
+        live, blocked = preflight.select_accounts(
+            pool, WORKSPACE_ROOT, **preflight_kw
+        )
         _record_preflight(Ledger(DISPATCH_LEDGER), blocked)
         if not live:
             print(

@@ -758,3 +758,26 @@ def test_execute_wave_concurrent(capsys: pytest.CaptureFixture[str]) -> None:
     assert "--- [tool-b] ---" in out
     assert "output from tool-b" in out
 
+
+def test_stage_dispatch_passes_provider() -> None:
+    args = _loop_ns(provider="gemini", dispatch_execute=False, allow_personal_token=False, app_id=None, app_installation_id=None, app_private_key=None)
+    ctx = fc._Ctx(args=args, accounts="/tmp/acct", skip_dispatch=False, py="python3")
+    stages = fc._stage_dispatch(ctx)
+    assert len(stages) == 1
+    assert "--provider" in stages[0].argv
+    idx = stages[0].argv.index("--provider")
+    assert stages[0].argv[idx + 1] == "gemini"
+
+
+def test_main_provider_flag_passed(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_cycle(args: argparse.Namespace, **kw: object) -> None:
+        captured["provider"] = args.provider
+
+    monkeypatch.setattr(fc, "_run_cycle", fake_run_cycle)
+    rc = fc.main(["--accounts", "/tmp/acct", "--provider", "gemini"])
+    assert rc == 0
+    assert captured["provider"] == "gemini"
+
+
