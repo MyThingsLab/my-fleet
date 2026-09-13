@@ -4,8 +4,11 @@ on:
   push:
     branches: [main]
     paths-ignore: ["**.md", "dev-ledger/**"]
+  # No `branches:` filter here (#52): a stacked PR (base != main) still needs
+  # to produce the `test` check main's branch protection requires, or it can
+  # never satisfy it regardless of how good the code is. `push` above stays
+  # scoped to main -- that's the only ref where a push-triggered run matters.
   pull_request:
-    branches: [main]
     types: [opened, synchronize, reopened, ready_for_review]
     paths-ignore: ["**.md", "dev-ledger/**"]
 
