@@ -33,6 +33,7 @@ study-cycle = "myfleet.study_cycle:main"
 fleet-heartbeat = "myfleet.heartbeat:main"
 fleet-audit = "myfleet.fleet_audit:main"
 goal-digest = "myfleet.goal_digest:main"
+ledger-audit = "myfleet.ledger_audit:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/myfleet"]
