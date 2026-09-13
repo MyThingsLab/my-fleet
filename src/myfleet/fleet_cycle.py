@@ -22,6 +22,17 @@ No tool calls another tool's CLI directly (each stays a separate `gh`-attributed
 run, per their CLAUDE.md invariants) -- this script is the external driver that
 chains them, the same role fleet_dispatch.py already plays for orchestrator+workers.
 
+Two systemd timers drive this script on two different cadences (#28), and
+--skip-dispatch/--skip-bookkeeping are how each tells it which half it owns:
+fleet-cycle.timer runs the frequent build tick (planner, dispatch) every few
+hours with --skip-bookkeeping, so mytester and mychangelogger's ~50-repo fan-out
+(BOOKKEEPING_STAGES) never runs on a tick that's mostly a no-op; fleet-
+bookkeeping.timer runs daily with --skip-dispatch and covers exactly that set
+instead, since presentation/provenance can lag behind code by a day without
+anyone noticing. Each run records a heartbeat (myfleet.heartbeat) for whichever
+half it just ran; a stale one means that timer stopped firing, not just that it
+found nothing to do.
+
 Defaults to a dry run (report only, no mutating subcommands). Pass --execute to
 actually run myresearcher/mytester/mychangelogger/mydocs/mydashboard/myprojector/
 myreporter/mypipeline/mytelegrambot for real; fleet_dispatch's own --execute is
@@ -63,6 +74,7 @@ from mythings.ledger import Ledger
 
 import myfleet.account_usage as account_usage
 import myfleet.fleet_ask as fleet_ask
+import myfleet.heartbeat as heartbeat
 import myfleet.preflight as preflight
 from myfleet.cycle_driver import Stage, import_or_die, run_command
 from myfleet.fleet_dispatch import DISPATCH_LEDGER, HALT_MARKER, _critical_halt_issues
@@ -93,6 +105,24 @@ RESEARCH_LABEL = "my-researcher"
 # my-template (a scaffold, not a real tool); non-Python repos have no
 # pyproject.toml and never match.
 EXCLUDED_REPOS = {"my-template"}
+
+# Presentation and provenance, not code -- the daily fleet-bookkeeping.timer's
+# job, not the frequent build tick's (#28). mytester and mychangelogger each
+# fan out across every tool_repos() entry (~50 repos) on every tick that
+# doesn't skip them; that's ~100 subprocess invocations -- many carrying an
+# Engine call -- to produce nothing most of the time. --skip-bookkeeping
+# drops all eight from the build tick; fleet-bookkeeping.service passes
+# --skip-dispatch instead so this set is the only thing left for it to run.
+BOOKKEEPING_STAGES = {
+    "mytester",
+    "mychangelogger",
+    "mydocs",
+    "mydashboard",
+    "myprojector",
+    "myreporter",
+    "mypipeline-sync",
+    "mytelegrambot",
+}
 
 
 def tool_repos(root: Path) -> list[str]:
@@ -479,6 +509,17 @@ def _execute_wave(
 
 
 def _run_cycle(args: argparse.Namespace, *, accounts: str, skip_dispatch: bool, py: str) -> None:
+    # Heartbeats record liveness, not success -- proof the systemd unit's
+    # ExecStart path still resolves and this process still reaches this line,
+    # regardless of --execute or a HALT below. That's deliberately weaker than
+    # "did anything useful happen": the point is only to catch a timer that
+    # stopped firing at all (#28), which a halted-but-alive run is not.
+    dispatch_ledger = Ledger(DISPATCH_LEDGER)
+    if not skip_dispatch:
+        heartbeat.record(dispatch_ledger, "build")
+    if not args.skip_bookkeeping:
+        heartbeat.record(dispatch_ledger, "bookkeeping")
+
     # Only a run that spends or mutates is gated; a pure dry run reports as
     # usual (matching fleet_dispatch, whose dry run also proceeds with a note).
     if args.execute or args.dispatch_execute:
@@ -494,6 +535,9 @@ def _run_cycle(args: argparse.Namespace, *, accounts: str, skip_dispatch: bool, 
             print(f"(wave: {', '.join(i.stage for i in wave)} — no dependency between them)")
         wave_stages: list[Stage] = []
         for item in wave:
+            if args.skip_bookkeeping and item.stage in BOOKKEEPING_STAGES:
+                print(f"(skipping {item.stage} — --skip-bookkeeping)")
+                continue
             resolver = RESOLVERS.get(item.stage)
             if resolver is None:
                 print(f"(no resolver for graph stage {item.stage!r} — skipping)")
@@ -700,6 +744,15 @@ def main(argv: list[str] | None = None) -> int:
         "--skip-dispatch",
         action="store_true",
         help="skip step 2 (fleet_dispatch); --loop: applies to every iteration",
+    )
+    parser.add_argument(
+        "--skip-bookkeeping",
+        action="store_true",
+        help="skip the daily bookkeeping stages (mytester/mychangelogger/mydocs/"
+        "mydashboard/myprojector/myreporter/mypipeline-sync/mytelegrambot). Pass "
+        "this on the frequent build tick (fleet-cycle.timer) and let "
+        "fleet-bookkeeping.timer's own daily run (--skip-dispatch) cover them "
+        "instead -- see BOOKKEEPING_STAGES and #28.",
     )
     parser.add_argument(
         "--allow-personal-token",

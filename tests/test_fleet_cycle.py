@@ -199,6 +199,74 @@ def test_execute_runs_mypipeline_sync_handoff_stage(
     assert sync_cmd[sync_cmd.index("--org") + 1] == fc.ORG
 
 
+def test_skip_bookkeeping_drops_mytester_and_mychangelogger(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The acceptance bar for #28: a build tick (--skip-bookkeeping) must not
+    # invoke either of the two stages that fan out across every tool repo.
+    calls = _capture_runs(monkeypatch)
+    monkeypatch.setattr(fc, "WORKSPACE_ROOT", tmp_path)
+    (tmp_path / "my-widget").mkdir()
+    (tmp_path / "my-widget" / "pyproject.toml").write_text("[project]\nname = 'my-widget'\n")
+    fc.main(
+        [
+            "--accounts",
+            "/tmp/acct",
+            "--skip-dispatch",
+            "--execute",
+            "--brief-count",
+            "0",
+            "--skip-bookkeeping",
+        ]
+    )
+    tools = {cmd[0] for cmd, _ in calls}
+    assert "mytester" not in tools
+    assert "mychangelogger" not in tools
+
+
+def test_skip_bookkeeping_drops_every_bookkeeping_stage(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    calls = _capture_runs(monkeypatch)
+    monkeypatch.setattr(fc, "WORKSPACE_ROOT", tmp_path)
+    (tmp_path / fc.DOCS_SITE_CLONE).mkdir()
+    fc.main(
+        [
+            "--accounts",
+            "/tmp/acct",
+            "--skip-dispatch",
+            "--execute",
+            "--brief-count",
+            "0",
+            "--skip-bookkeeping",
+        ]
+    )
+    tools = {cmd[0] for cmd, _ in calls}
+    assert tools.isdisjoint(fc.BOOKKEEPING_STAGES)
+    out = capsys.readouterr().out
+    assert "skipping mydocs — --skip-bookkeeping" in out
+
+
+def test_skip_bookkeeping_still_runs_the_build_stages(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls = _capture_runs(monkeypatch)
+    monkeypatch.setattr(fc, "WORKSPACE_ROOT", tmp_path)
+    fc.main(
+        [
+            "--accounts",
+            "/tmp/acct",
+            "--execute",
+            "--brief-count",
+            "0",
+            "--skip-bookkeeping",
+        ]
+    )
+    tools = [cmd[0] for cmd, _ in calls]
+    assert "myplanner" in tools
+    assert any(any("myfleet.fleet_dispatch" in part for part in cmd) for cmd, _ in calls)
+
+
 def test_unknown_graph_stage_is_skipped_not_fatal(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -337,6 +405,65 @@ def test_gh_json_returns_none_on_failure(monkeypatch: pytest.MonkeyPatch) -> Non
     assert fc._gh_json(["issue", "list"]) is None
 
 
+# ---- heartbeats (#28) -------------------------------------------------------
+
+
+def test_build_tick_records_only_the_build_heartbeat(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _capture_runs(monkeypatch)
+    ledger_path = tmp_path / "ledger.jsonl"
+    monkeypatch.setattr(fc, "DISPATCH_LEDGER", ledger_path)
+    monkeypatch.setattr(fc, "WORKSPACE_ROOT", tmp_path)
+    fc.main(
+        ["--accounts", "/tmp/acct", "--execute", "--brief-count", "0", "--skip-bookkeeping"]
+    )
+    ticks = [e.data.get("tick") for e in fc.Ledger(ledger_path).read(tool="fleet_cycle", kind="heartbeat")]
+    assert ticks == ["build"]
+
+
+def test_bookkeeping_tick_records_only_the_bookkeeping_heartbeat(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _capture_runs(monkeypatch)
+    ledger_path = tmp_path / "ledger.jsonl"
+    monkeypatch.setattr(fc, "DISPATCH_LEDGER", ledger_path)
+    monkeypatch.setattr(fc, "WORKSPACE_ROOT", tmp_path)
+    fc.main(["--accounts", "/tmp/acct", "--skip-dispatch", "--execute", "--brief-count", "0"])
+    ticks = [e.data.get("tick") for e in fc.Ledger(ledger_path).read(tool="fleet_cycle", kind="heartbeat")]
+    assert ticks == ["bookkeeping"]
+
+
+def test_a_full_cycle_records_both_heartbeats(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _capture_runs(monkeypatch)
+    ledger_path = tmp_path / "ledger.jsonl"
+    monkeypatch.setattr(fc, "DISPATCH_LEDGER", ledger_path)
+    monkeypatch.setattr(fc, "WORKSPACE_ROOT", tmp_path)
+    fc.main(["--accounts", "/tmp/acct", "--execute", "--brief-count", "0"])
+    ticks = {e.data.get("tick") for e in fc.Ledger(ledger_path).read(tool="fleet_cycle", kind="heartbeat")}
+    assert ticks == {"build", "bookkeeping"}
+
+
+def test_halted_cycle_still_records_a_heartbeat(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Heartbeats prove the process reached this line at all -- a run that was
+    # legitimately halted (kill switch, critical issue) is still alive, not
+    # the silent-timer failure mode #28's heartbeat exists to catch.
+    calls = _capture_runs(monkeypatch)
+    ledger_path = tmp_path / "ledger.jsonl"
+    monkeypatch.setattr(fc, "DISPATCH_LEDGER", ledger_path)
+    marker = tmp_path / "HALT"
+    marker.write_text("halted\n")
+    monkeypatch.setattr(fc, "HALT_MARKER", marker)
+    fc.main(["--accounts", "/tmp/acct", "--execute", "--skip-dispatch", "--brief-count", "0"])
+    assert calls == []
+    ticks = {e.data.get("tick") for e in fc.Ledger(ledger_path).read(tool="fleet_cycle", kind="heartbeat")}
+    assert ticks == {"bookkeeping"}
+
+
 # ---- --loop ----------------------------------------------------------------
 
 
@@ -361,6 +488,7 @@ def _loop_ns(**overrides: object) -> argparse.Namespace:
         dispatch_execute=False,
         engine="noop",
         skip_dispatch=False,
+        skip_bookkeeping=False,
         brief_count=0,
         loop=True,
         max_duration_min=None,

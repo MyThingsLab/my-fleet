@@ -1,11 +1,11 @@
 # Deployed on the Pi (lollinuxpi-server), checkout at ~/repos/MyThingsLab.
 [Unit]
-Description=Run the MyThingsLab fleet bookkeeping cycle daily
+Description=Check the fleet-cycle/fleet-bookkeeping heartbeats hourly
 
 [Timer]
-OnCalendar=daily
+OnBootSec=5min
+OnUnitActiveSec=1h
 Persistent=true
-RandomizedDelaySec=300
 
 [Install]
 WantedBy=timers.target

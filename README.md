@@ -150,6 +150,9 @@ dispatch step, arming the marker halts that path too.
   **[`myfleet.cycle_driver`](src/myfleet/cycle_driver.py)** — the study-loop
   counterpart of `fleet_cycle`, and the shared stage-running driver both
   cycles are built on.
+- **[`myfleet.heartbeat`](src/myfleet/heartbeat.py)** — dead-man's-switch for
+  the build/bookkeeping timers (#28): alerts when a tick's last recorded
+  heartbeat is older than its own cadence allows.
 
 ## Install (development)
 
@@ -163,45 +166,61 @@ the fleet root as `my-fleet/`.
 pip install -e ".[dev]"
 ```
 
-## Deploy: the bookkeeping timer
-
-Every fleet instrument (`TODO.md`, the docs site, the dashboard, the resume
-handoff brief) is refresh-on-run — nothing keeps them current while the
-dispatch loop is idle. `systemd/fleet-bookkeeping.{service,timer}` run
-`fleet_cycle.py --execute --skip-dispatch --brief-count 0 --engine noop`
-daily: every step except dispatch and research briefs (planner, tester,
-projector, reporter, docs sync, dashboard render) executes for free, with no
-billed Engine calls and no worker sessions spawned. Switch `--engine` to
-`claude-cli` once a run has confirmed the noop path end to end.
-
-```bash
-mkdir -p ~/.config/systemd/user
-cp systemd/fleet-bookkeeping.{service,timer} ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now fleet-bookkeeping.timer
-```
-
-The unit files assume the fleet root is checked out at
-`~/Desktop/MyThingsLab`; edit the paths in `fleet-bookkeeping.service` first
-if yours differs. `FLEET_ACCOUNTS` in the service file is unused by this cycle
-(dispatch is skipped) but still required by `fleet_cycle.py`'s CLI — leave the
-default unless `--accounts` parsing itself needs a real path.
-
 ## Deploy: the supervised loop (the Pi)
 
-`systemd/fleet-cycle.{service,timer}`, `fleet-usage.{service,timer}`,
-`mytelegrambot.service(.d/testers.conf)` and `telegram-alert@.service` are
-checked-in reference copies of what actually runs, unprivileged, under
-`lollinuxpi-server`'s system-wide systemd (`/etc/systemd/system/`, not
-`~/.config/systemd/user/`) — the bookkeeping timer above is a separate,
-laptop-side thing. These exist so a path move (like #58's `fleet-dispatch` →
-`my-fleet` rename) is a diffable, reviewable change instead of invisible drift
-between the live `/etc/systemd/system/*.service` files and this repo — that
-exact drift caused 183 consecutive silent `fleet-cycle` failures
-(2026-08-03 → 2026-08-26) before anyone noticed. **Whenever a unit is edited
-live on the Pi, copy the change back here in the same session** — these files
-are documentation of a manual `sudo cp` + `daemon-reload`, not something
-`fleet-cycle.py` deploys itself.
+Two timers drive `fleet_cycle.py` on two different cadences (#28), so that
+the ~50-repo `mytester`/`mychangelogger` fan-out (`BOOKKEEPING_STAGES`) never
+rides along on a tick that's mostly a no-op:
+
+- `systemd/fleet-cycle.{service,timer}` — the frequent **build tick**
+  (`myplanner` → `fleet_dispatch`), every 6 hours, via `run_fleet_cycle.sh
+  --skip-bookkeeping`.
+- `systemd/fleet-bookkeeping.{service,timer}` — the daily **bookkeeping
+  tick** (`mytester`, `mychangelogger`, `mydocs`, `mydashboard`,
+  `myprojector`, `myreporter`, `mypipeline sync`, `mytelegrambot`), via
+  `fleet_cycle.py --execute --skip-dispatch --brief-count 0 --engine noop`
+  directly — presentation/provenance, so it needs no account and spawns no
+  billed Engine calls or worker sessions. Switch `--engine` to `claude-cli`
+  once a run has confirmed the noop path end to end.
+- `systemd/fleet-heartbeat.{service,timer}` — hourly dead-man's-switch:
+  `myfleet.heartbeat` alerts (and exits nonzero) if either tick's last
+  recorded heartbeat is older than its own cadence allows, closing the gap a
+  unit that silently stops firing leaves behind (`OnFailure=` only fires when
+  the `ExecStart` itself runs and fails — a masked or never-installed timer
+  produces nothing to catch). See `myfleet.heartbeat`'s module docstring for
+  the incident that motivated it.
+
+`systemd/fleet-usage.{service,timer}`, `mytelegrambot.service(.d/testers.conf)`
+and `telegram-alert@.service` round out the deployment: usage polling and the
+`OnFailure=telegram-alert@%n.service` alert every one of the above fires on a
+failed run.
+
+All of these are checked-in reference copies of what actually runs,
+unprivileged, under `lollinuxpi-server`'s system-wide systemd
+(`/etc/systemd/system/`, not `~/.config/systemd/user/`). They exist so a path
+move (like #58's `fleet-dispatch` → `my-fleet` rename) is a diffable,
+reviewable change instead of invisible drift between the live
+`/etc/systemd/system/*.service` files and this repo — that exact drift caused
+183 consecutive silent `fleet-cycle` failures (2026-08-03 → 2026-08-26) before
+anyone noticed. **Whenever a unit is edited live on the Pi, copy the change
+back here in the same session** — these files are documentation of a manual
+`sudo cp` + `daemon-reload`, not something `fleet-cycle.py` deploys itself.
+
+```bash
+sudo cp systemd/fleet-cycle.{service,timer} systemd/fleet-bookkeeping.{service,timer} \
+        systemd/fleet-heartbeat.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now fleet-cycle.timer fleet-bookkeeping.timer fleet-heartbeat.timer
+```
+
+To confirm a timer actually fires rather than trusting `enable --now`, run its
+service once by hand and check the journal, then watch for its heartbeat:
+
+```bash
+sudo systemctl start fleet-cycle.service && journalctl -u fleet-cycle.service -n 50
+sudo systemctl start fleet-bookkeeping.service && journalctl -u fleet-bookkeeping.service -n 50
+python3 -m myfleet.heartbeat  # "heartbeats fresh: bookkeeping, build" once both have run
+```
 
 ## License
 

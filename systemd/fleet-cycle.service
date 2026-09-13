@@ -12,4 +12,4 @@ WorkingDirectory=/home/lollinuxpi/repos/MyThingsLab/my-fleet
 Environment=PATH=/home/lollinuxpi/repos/MyThingsLab/.venv/bin:/usr/bin:/bin
 Environment=FLEET_ACCOUNTS=/home/lollinuxpi/.claude-personal,/home/lollinuxpi/.claude-work
 EnvironmentFile=-/home/lollinuxpi/.config/mythingslab/telegram.env
-ExecStart=/home/lollinuxpi/repos/MyThingsLab/my-fleet/run_fleet_cycle.sh
+ExecStart=/home/lollinuxpi/repos/MyThingsLab/my-fleet/run_fleet_cycle.sh --skip-bookkeeping
