@@ -4,6 +4,37 @@ All notable changes to `my-fleet` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [semver](https://semver.org/), per the rules in `RELEASE.md`.
 
+## [Unreleased]
+
+### Changed
+
+- **The dispatch loop's runtime dir moved from `.fleet-dispatch/` to
+  `.my-fleet/`** (under the fleet root, unchanged otherwise): ledger,
+  transcripts, the `HALT` kill-switch marker, and the daily-cap override. The
+  old name referred to the workspace-root repo that owned these scripts before
+  #58; that repo is now archived, so the name pointed at nothing. The four
+  paths are now derived from one `RUNTIME_DIR` constant rather than repeating
+  the literal.
+
+  **This is not backward compatible and there is no auto-migration.** A
+  deployment that does not move the directory starts from an empty ledger and,
+  more importantly, **stops seeing an armed `HALT` marker** — a kill switch
+  armed under the old path will not halt a run reading the new one. Move it
+  explicitly on every host before the next `--execute`:
+
+  ```bash
+  mv "$FLEET_ROOT/.fleet-dispatch" "$FLEET_ROOT/.my-fleet"
+  ```
+
+### Added
+
+- `workspace/` — the fleet-root docs (`AGENTS.md`, `README.md`, `TODO.md`) and
+  `dev-ledger/`, previously tracked in the now-archived `fleet-dispatch` repo.
+  The fleet root symlinks to these, so the workspace instructions stay
+  versioned somewhere writable.
+- `scripts/fanout_pythonpath.py` — applies the `pythonpath = ["src"]` pytest
+  fix across product repos. Ported from the archived `fleet-dispatch#69`.
+
 ## [2.0.0] - 2026-07-22
 
 ### Changed
