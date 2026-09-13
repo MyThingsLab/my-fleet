@@ -23,20 +23,19 @@ from pathlib import Path
 from mytelegrambot.transport import HTTPTelegramTransport
 from mythings.ledger import Ledger
 
-from myfleet.workspace import fleet_root
+from myfleet.workspace import fleet_root, ledger_path
 
 TOOL = "fleet_cycle"
 KIND = "heartbeat"
 
 # Still not imported from fleet_dispatch.py: that module pulls in myorchestrator
-# and friends, weight this dead-man's-switch has no reason to carry just to
-# compute the same path fleet_dispatch.DISPATCH_LEDGER already resolves to.
-# myfleet.workspace is the seam that exists for exactly this -- the bare
-# parents[3] climb resolves to a /tmp scratch prefix under an isolation
-# Workspace, which would point this at a ledger nobody writes and make a dead
-# fleet look alive.
+# and friends, weight this dead-man's-switch has no reason to carry. But the
+# path itself now comes from myfleet.workspace rather than being spelled out
+# again here -- writing it twice is what let the reader keep pointing at
+# `.fleet-dispatch/` after #62 renamed the directory, so this alerted on a
+# ledger nobody writes while the real one filled up beside it.
 WORKSPACE_ROOT = fleet_root(__file__)
-DEFAULT_LEDGER = WORKSPACE_ROOT / ".fleet-dispatch" / "ledger.jsonl"
+DEFAULT_LEDGER = ledger_path(WORKSPACE_ROOT)
 
 # One tick per timer, given each timer's own cadence plus slack for one missed
 # run and its RandomizedDelaySec jitter -- not the bare interval, which would

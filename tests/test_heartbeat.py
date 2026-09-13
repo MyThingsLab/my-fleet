@@ -25,10 +25,34 @@ def test_the_default_ledger_follows_an_explicit_fleet_root(
     reloaded = importlib.reload(hb)
     try:
         assert reloaded.WORKSPACE_ROOT == tmp_path
-        assert reloaded.DEFAULT_LEDGER == tmp_path / ".fleet-dispatch" / "ledger.jsonl"
+        assert reloaded.DEFAULT_LEDGER == workspace.ledger_path(tmp_path)
     finally:
         monkeypatch.delenv(workspace.ROOT_ENV, raising=False)
         importlib.reload(hb)
+
+
+def test_the_switch_reads_the_ledger_the_cycle_actually_writes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The bug this replaces a green test with. The line above used to assert
+    # DEFAULT_LEDGER == tmp_path / ".fleet-dispatch" / "ledger.jsonl" -- a
+    # literal, so when #62 renamed the runtime dir to .my-fleet/ the writer moved
+    # and the reader did not, and the test happily confirmed the stale path.
+    # Nothing anywhere compared the two ends, so for weeks the switch reported
+    # both ticks "never recorded" against an empty path while the real ledger
+    # filled up beside it: a dead-man's switch that cannot tell dead from alive.
+    #
+    # Pinning them to each other rather than to a literal is the whole point --
+    # rename the directory again and this fails only if the two disagree.
+    monkeypatch.setenv(workspace.ROOT_ENV, str(tmp_path))
+    reader = importlib.reload(hb)
+    writer = importlib.reload(importlib.import_module("myfleet.fleet_dispatch"))
+    try:
+        assert reader.DEFAULT_LEDGER == writer.DISPATCH_LEDGER
+    finally:
+        monkeypatch.delenv(workspace.ROOT_ENV, raising=False)
+        importlib.reload(hb)
+        importlib.reload(writer)
 
 
 def test_last_heartbeat_none_when_never_recorded(tmp_path: Path) -> None:

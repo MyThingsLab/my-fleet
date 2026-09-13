@@ -1,6 +1,15 @@
 # Deployed on the Pi (lollinuxpi-server), checkout at ~/repos/MyThingsLab.
+#
+# Copied back from the live /etc/systemd/system/fleet-cycle.service, which had
+# drifted from this file: it runs --execute --dispatch-execute under the GitHub
+# App with --ask-human, and it does NOT pass --skip-bookkeeping. So this is one
+# full tick every 6h, not the build/bookkeeping split the README described --
+# fleet-bookkeeping.timer was never installed. That matters to the heartbeat:
+# fleet_cycle records the 'bookkeeping' tick whenever it wasn't told to skip it,
+# so this single unit feeds both heartbeats and installing fleet-bookkeeping
+# alongside it would just run the ~50-repo fan-out twice.
 [Unit]
-Description=MyThingsLab fleet cycle (dry-run)
+Description=MyThingsLab fleet cycle (live)
 After=network-online.target
 Wants=network-online.target
 OnFailure=telegram-alert@%n.service
@@ -12,4 +21,4 @@ WorkingDirectory=/home/lollinuxpi/repos/MyThingsLab/my-fleet
 Environment=PATH=/home/lollinuxpi/repos/MyThingsLab/.venv/bin:/usr/bin:/bin
 Environment=FLEET_ACCOUNTS=/home/lollinuxpi/.claude-personal,/home/lollinuxpi/.claude-work
 EnvironmentFile=-/home/lollinuxpi/.config/mythingslab/telegram.env
-ExecStart=/home/lollinuxpi/repos/MyThingsLab/my-fleet/run_fleet_cycle.sh --skip-bookkeeping
+ExecStart=/home/lollinuxpi/repos/MyThingsLab/my-fleet/run_fleet_cycle.sh --execute --dispatch-execute --app-id 4919696 --app-installation-id 161109462 --app-private-key /home/lollinuxpi/.config/mythingslab/github-app.pem --ask-human
