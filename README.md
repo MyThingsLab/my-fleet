@@ -153,6 +153,11 @@ dispatch step, arming the marker halts that path too.
 - **[`myfleet.heartbeat`](src/myfleet/heartbeat.py)** — dead-man's-switch for
   the build/bookkeeping timers (#28): alerts when a tick's last recorded
   heartbeat is older than its own cadence allows.
+- **[`myfleet.red_main`](src/myfleet/red_main.py)** — watches every kernel
+  repo's `main`. A red one becomes a `prio:P0` issue (priority via
+  `mythings.labels.escalate`, not a local opinion) and is closed again on
+  recovery. Runs in wave 0 of the cycle, ahead of dispatch, so workers are not
+  sent at a repo whose base is already broken.
 
 ## Install (development)
 

@@ -166,8 +166,12 @@ def test_cycle_stage_order_follows_the_graph_plan(
     monkeypatch.setattr(fc, "WORKSPACE_ROOT", tmp_path)
     (tmp_path / fc.DOCS_SITE_CLONE).mkdir()
     fc.main(["--accounts", "/tmp/acct", "--skip-dispatch", "--execute", "--brief-count", "0"])
-    tools = [cmd[0] for cmd, _ in calls]
-    assert tools[0] == "myplanner"
+    argvs = [cmd for cmd, _ in calls]
+    tools = [cmd[0] for cmd in argvs]
+    # red-main shares wave 0 with the planner and has to land before dispatch;
+    # it runs as `<py> -m myfleet.red_main`, so cmd[0] is the interpreter.
+    assert "myfleet.red_main" in argvs[0]
+    assert tools[1] == "myplanner"
     assert tools[-1] == "mytelegrambot"
     # mypipeline sync (the ledger->issue handoffs) is wired in before notify.
     assert tools.index("mypipeline") < tools.index("mytelegrambot")
