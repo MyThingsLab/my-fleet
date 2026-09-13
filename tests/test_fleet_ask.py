@@ -383,3 +383,22 @@ def test_escalate_blocker_returns_false_on_timeout(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(fleet_ask.subprocess, "run", raise_timeout)
 
     assert fleet_ask.escalate_blocker(candidate="repo#1", detail="d", attempt=1) is False
+
+
+def test_fleet_root_raises_or_resolves_env_var_in_worktree(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from myfleet.workspace import ROOT_ENV, fleet_root
+
+    isolated_file = tmp_path / "worktree" / "my-tool" / "src" / "mytool" / "mod.py"
+    isolated_file.parent.mkdir(parents=True)
+
+    monkeypatch.delenv(ROOT_ENV, raising=False)
+    with pytest.raises(RuntimeError, match="Cannot resolve MyThingsLab fleet root"):
+        fleet_root(str(isolated_file))
+
+    real_root = tmp_path / "real_fleet_root"
+    real_root.mkdir()
+    monkeypatch.setenv(ROOT_ENV, str(real_root))
+    assert fleet_root(str(isolated_file)) == real_root.resolve()
+
