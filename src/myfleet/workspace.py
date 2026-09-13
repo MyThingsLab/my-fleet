@@ -48,18 +48,21 @@ _MARKERS = ("my-things-core", "my-fleet")
 
 
 def looks_like_fleet_root(path: Path) -> bool:
-    return all((path / marker).is_dir() for marker in _MARKERS)
+    return any((path / marker).is_dir() for marker in _MARKERS)
 
 
 def fleet_root(module_file: str) -> Path:
-    # Deliberately not validated-or-raise. CI checks out this repo alone, with
-    # no sibling tools, so no candidate passes `looks_like_fleet_root` there and
-    # raising at import would take the suite down. The env var is the fix for
-    # the case that actually hurt; the climb stays the fallback it always was.
     override = os.environ.get(ROOT_ENV, "").strip()
     if override:
         return Path(override).resolve()
-    return Path(module_file).resolve().parents[3]
+    file_path = Path(module_file).resolve()
+    for parent in [file_path, *file_path.parents]:
+        if looks_like_fleet_root(parent):
+            return parent
+    raise RuntimeError(
+        f"Cannot resolve MyThingsLab fleet root from {module_file}. "
+        f"Set {ROOT_ENV} or ensure the path is within a valid fleet root."
+    )
 
 
 def runtime_dir(root: Path) -> Path:
