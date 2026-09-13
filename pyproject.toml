@@ -32,6 +32,7 @@ notify-systemd-status = "myfleet.notify_systemd_status:main"
 study-cycle = "myfleet.study_cycle:main"
 fleet-heartbeat = "myfleet.heartbeat:main"
 fleet-audit = "myfleet.fleet_audit:main"
+goal-digest = "myfleet.goal_digest:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/myfleet"]
