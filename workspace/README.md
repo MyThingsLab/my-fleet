@@ -113,13 +113,9 @@ Two systemd timers on the Pi drive it, split so the ~50-repo bookkeeping
 fan-out never rides a tick that is mostly a no-op:
 
 - **build tick**, every 6h — `myplanner` → `fleet_dispatch`, the only tick
-  that spends money.
-- **bookkeeping tick**, daily — everything else, no account needed.
-- **heartbeat**, hourly — a dead-man's switch that alerts when either tick's
-  last recorded heartbeat is older than its own cadence allows. It exists
-  because `OnFailure=` only fires when `ExecStart` *runs* and fails; a masked
-  or never-installed timer produces nothing to catch, and that exact gap
-  caused 183 consecutive silent failures before anyone noticed.
+  that spends money. Uses topographical wave dispatching (`core` → `kernel` → `product` → `external`).
+- **bookkeeping tick**, daily — everything else, no account needed. Includes `myfleet.fleet_audit` (codebase graph audit across repos) and `myfleet.goal_digest` (6-hour executive telemetry digest).
+- **heartbeat**, hourly — a dead-man's switch backed by `myfleet.ledger_audit` (verifying cadence plausibility, filtering synthetic test pollution, and auditing authentic `fleet_dispatch` liveness). It alerts when either tick's last recorded heartbeat is older than its cadence allows.
 
 See [my-fleet's README](https://github.com/MyThingsLab/my-fleet) for flags,
 deployment and the module-by-module breakdown.
