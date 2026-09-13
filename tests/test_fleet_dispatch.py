@@ -2061,3 +2061,30 @@ def test_dispatch_one_injects_graph_path(tmp_path: Path, monkeypatch) -> None:
     graph_file = Path(captured_env["MYTHINGS_GRAPH_PATH"])
     assert graph_file.exists()
     assert graph_file.name == "graph.sqlite"
+
+
+def test_repo_wave_hierarchy() -> None:
+    assert fd._repo_wave("my-things-core") == 0
+    assert fd._repo_wave("my-fleet") == 1
+    assert fd._repo_wave("my-coder") == 1
+    assert fd._repo_wave("my-dashboard") == 2
+    assert fd._repo_wave("my-site") == 2
+    assert fd._repo_wave("external-tool") == 3
+
+
+def test_sort_candidates_by_wave() -> None:
+    c_product = fd.Candidate(
+        id="my-dashboard#5", repo="my-dashboard", tool="my-dashboard", title="t1", kind="issue", created_at="2026-09-13T20:00:00Z"
+    )
+    c_core = fd.Candidate(
+        id="my-things-core#10", repo="my-things-core", tool="my-things-core", title="t2", kind="issue", created_at="2026-09-13T20:00:00Z"
+    )
+    c_kernel = fd.Candidate(
+        id="my-fleet#80", repo="my-fleet", tool="my-fleet", title="t3", kind="issue", created_at="2026-09-13T20:00:00Z"
+    )
+
+    candidates = [c_product, c_core, c_kernel]
+    sorted_candidates = fd.sort_candidates_by_wave(candidates)
+
+    assert [c.repo for c in sorted_candidates] == ["my-things-core", "my-fleet", "my-dashboard"]
+
