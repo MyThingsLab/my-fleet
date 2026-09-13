@@ -18,6 +18,7 @@ import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 # Climbs myfleet/<file>.py -> src -> my-fleet -> MyThingsLab/ (the fleet root).
@@ -77,41 +78,56 @@ def ask_command(
     return f"{binary} ask --ledger {ledger} --timeout {timeout}"
 
 
-def daemon_is_running() -> bool:
+def is_daemon_argv(argv: Sequence[bytes]) -> bool:
+    """Whether one process's argv is the ASK daemon's.
+
+    Split out of `daemon_is_running` so it can be tested against a single known
+    argv. The walk below asks a question about the whole machine, and any test
+    of *that* is really an assertion about whatever else happens to be running:
+    asserting False fails on the host where the daemon is up, and asserting True
+    passes even if this predicate is broken, as long as some daemon is live.
+    Both were real (my-fleet#45). This function has no such ambiguity.
+
+    Read argv directly rather than shelling out to `pgrep -f`, which matches its
+    pattern anywhere in a command line: any shell, editor or grep that merely
+    *mentions* "mytelegrambot run" satisfies it. A false positive here is the
+    exact silent failure this check exists to prevent -- arming a channel nobody
+    is listening on.
+
+    `pgrep -x mytelegrambot` is no good either, and neither is checking argv[0]:
+    the daemon is a venv console script, so the kernel execs the *interpreter*
+    named in its shebang. Its real argv is
+
+        ['/.../.venv/bin/python3', '/.../.venv/bin/mytelegrambot', 'run']
+
+    -- the process name is "python3" and argv[0] is the interpreter. What is
+    actually invariant is an argv element basenaming to `mytelegrambot` with
+    `run` immediately after it. That matches the shebang form above, a direct
+    exec, and `python -m mytelegrambot run`; it does not match a shell whose one
+    big argv string merely contains the words.
+    """
+    for arg, following in zip(argv, argv[1:], strict=False):
+        if following != b"run":
+            continue
+        if Path(arg.decode(errors="replace")).name == "mytelegrambot":
+            return True
+    return False
+
+
+def daemon_is_running(*, proc_root: Path = Path("/proc")) -> bool:
     # The daemon is the only `getUpdates` caller and we must not become a second
     # one, so liveness cannot be probed by talking to Telegram. It also writes
     # nothing to the ledger while idle (an idle long-poll is not an event), so
     # ledger freshness proves nothing either. That leaves the process table.
-    #
-    # Read argv directly rather than shelling out to `pgrep -f`, which matches its
-    # pattern anywhere in a command line: any shell, editor or grep that merely
-    # *mentions* "mytelegrambot run" satisfies it. A false positive here is the
-    # exact silent failure this check exists to prevent -- arming a channel nobody
-    # is listening on.
-    #
-    # `pgrep -x mytelegrambot` is no good either, and neither is checking argv[0]:
-    # the daemon is a venv console script, so the kernel execs the *interpreter*
-    # named in its shebang. Its real argv is
-    #
-    #     ['/.../.venv/bin/python3', '/.../.venv/bin/mytelegrambot', 'run']
-    #
-    # -- the process name is "python3" and argv[0] is the interpreter. What is
-    # actually invariant is an argv element basenaming to `mytelegrambot` with
-    # `run` immediately after it. That matches the shebang form above, a direct
-    # exec, and `python -m mytelegrambot run`; it does not match a shell whose one
-    # big argv string merely contains the words.
-    for pid_dir in Path("/proc").iterdir():
+    for pid_dir in proc_root.iterdir():
         if not pid_dir.name.isdigit() or pid_dir.name == str(os.getpid()):
             continue
         try:
             argv = (pid_dir / "cmdline").read_bytes().split(b"\0")
         except OSError:
             continue  # the process exited, or is not ours to read
-        for arg, following in zip(argv, argv[1:], strict=False):
-            if following != b"run":
-                continue
-            if Path(arg.decode(errors="replace")).name == "mytelegrambot":
-                return True
+        if is_daemon_argv(argv):
+            return True
     return False
 
 
