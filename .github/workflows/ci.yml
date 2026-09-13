@@ -3,14 +3,12 @@ name: CI
 on:
   push:
     branches: [main]
-    paths-ignore: ["**.md", "dev-ledger/**"]
   # No `branches:` filter here (#52): a stacked PR (base != main) still needs
   # to produce the `test` check main's branch protection requires, or it can
   # never satisfy it regardless of how good the code is. `push` above stays
   # scoped to main -- that's the only ref where a push-triggered run matters.
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
-    paths-ignore: ["**.md", "dev-ledger/**"]
 
 # Supersede in-flight runs when an agent pushes again to the same ref.
 concurrency:
@@ -28,6 +26,26 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+      - name: Check changed files
+        id: changes
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+            HEAD="${{ github.event.pull_request.head.sha }}"
+          else
+            BASE="${{ github.event.before }}"
+            if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+              BASE="HEAD~1"
+            fi
+            HEAD="HEAD"
+          fi
+          CHANGED=$(git diff --name-only "$BASE" "$HEAD" | grep -vE '(\.md$|^docs/|^dev-ledger/)' || true)
+          if [ -n "$CHANGED" ]; then
+            echo "code_changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "code_changed=false" >> "$GITHUB_OUTPUT"
+            echo "Only docs/dev-ledger changed; skipping build and test steps."
+          fi
       # This repo's only real deps beyond my-things-core are sibling repos
       # from the same owner (not on PyPI): the orchestrator, the merge guard,
       # the Telegram transport used by the ASK channel, the tool-chaining
@@ -44,6 +62,7 @@ jobs:
       # my-orchestrator@main imports, so pinning it red-lines this repo.
       # Restore the pin once core tags a release.
       - name: Install
+        if: steps.changes.outputs.code_changed == 'true'
         run: |
           pip install "my-things-core @ git+https://github.com/${{ github.repository_owner }}/my-things-core@main"
           # --no-deps: its only dep is the core installed above, but its main
@@ -63,8 +82,10 @@ jobs:
           pip install --no-deps "my-coder @ git+https://github.com/${{ github.repository_owner }}/my-coder@main"
           pip install -e ".[dev]"
       - name: Ruff
+        if: steps.changes.outputs.code_changed == 'true'
         run: ruff check src tests
       # test_integration_reporter.py is deliberately absent: it needs sibling
       # checkouts (run locally via fleet_test.py --include-slow).
       - name: Tests
+        if: steps.changes.outputs.code_changed == 'true'
         run: pytest tests --ignore=tests/test_integration_reporter.py

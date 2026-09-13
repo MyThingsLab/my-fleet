@@ -1,1 +1,2 @@
 {"data":{"session":"2026-09-14"},"detail":"Validate fleet root by parent walk and raise if unresolvable to prevent WORKSPACE_ROOT escaping to /tmp in worktrees","kind":"decision","outcome":"success","tool":"claude-code","ts":"2026-09-13T22:07:28Z"}
+{"data":{"session":"2026-09-14"},"detail":"Replace paths-ignore with step skipping in my-fleet CI workflow","kind":"decision","outcome":"success","tool":"claude-code","ts":"2026-09-13T22:07:59Z"}
