@@ -299,6 +299,7 @@ def test_the_refusal_never_echoes_the_token(
 # the run that triggered the push must survive a dead channel.
 
 
+@pytest.mark.real_notifiers
 def test_alert_spend_invokes_the_bot_with_the_right_args(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -323,6 +324,7 @@ def test_alert_spend_invokes_the_bot_with_the_right_args(
     assert argv[argv.index("--ledger") + 1] == str(ledger)
 
 
+@pytest.mark.real_notifiers
 def test_alert_spend_returns_false_on_a_nonzero_exit(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(fleet_ask, "ask_binary", lambda: Path("/usr/bin/mytelegrambot"))
     monkeypatch.setattr(
@@ -332,6 +334,7 @@ def test_alert_spend_returns_false_on_a_nonzero_exit(monkeypatch: pytest.MonkeyP
     assert fleet_ask.alert_spend(spent=1, cap=2, raise_to=3) is False
 
 
+@pytest.mark.real_notifiers
 def test_alert_spend_swallows_a_missing_binary(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(fleet_ask, "ask_binary", lambda: Path("/usr/bin/mytelegrambot"))
 
@@ -343,6 +346,7 @@ def test_alert_spend_swallows_a_missing_binary(monkeypatch: pytest.MonkeyPatch) 
     assert fleet_ask.alert_spend(spent=1, cap=2, raise_to=3) is False
 
 
+@pytest.mark.real_notifiers
 def test_escalate_blocker_invokes_the_bot_with_the_right_args(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -369,6 +373,7 @@ def test_escalate_blocker_invokes_the_bot_with_the_right_args(
     assert argv[argv.index("--ledger") + 1] == str(ledger)
 
 
+@pytest.mark.real_notifiers
 def test_escalate_blocker_returns_false_on_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(fleet_ask, "ask_binary", lambda: Path("/usr/bin/mytelegrambot"))
 
