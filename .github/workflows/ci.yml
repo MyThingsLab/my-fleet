@@ -34,7 +34,7 @@ jobs:
       # v0 and float on @main.
       - name: Install
         run: |
-          pip install "my-things-core @ git+https://github.com/${{ github.repository_owner }}/my-things-core@v1.0.0"
+          pip install "my-things-core @ git+https://github.com/${{ github.repository_owner }}/my-things-core@main"
           # --no-deps: its only dep is the core installed above, but its main
           # still names it "mythings-core" (pre-rename) which pip can't resolve.
           pip install --no-deps "my-orchestrator @ git+https://github.com/${{ github.repository_owner }}/my-orchestrator@main"

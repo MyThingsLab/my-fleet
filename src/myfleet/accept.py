@@ -73,7 +73,9 @@ ORG = "MyThingsLab"
 SHARED_CARVE_OUTS: tuple[tuple[str, str], ...] = (
     # The constraints on agents. An agent that can merge a relaxation of its own
     # constraints has no constraints, only a delay.
+    ("AGENTS.md", "the rules that constrain agents"),
     ("CLAUDE.md", "the rules that constrain agents"),
+    ("GEMINI.md", "the rules that constrain agents"),
     ("HARNESS.md", "the build harness contract"),
     (".github/workflows/", "CI definitions -- the evidence this gate relies on"),
     (".claude/", "agent permissions and settings"),
@@ -94,6 +96,9 @@ REPO_CARVE_OUTS: dict[str, tuple[tuple[str, str], ...]] = {
         ("src/myfleet/merge_ready_prs.py", "a myfleet merge path"),
         ("src/myfleet/merge_order_prs.py", "a myfleet merge path"),
         ("src/myfleet/fleet_dispatch.py", "the dispatch path that opens PRs"),
+        ("src/myfleet/fleet_cycle.py", "the autonomous cycle loop driver"),
+        ("src/myfleet/cycle_driver.py", "the cycle driver controls"),
+        ("src/myfleet/preflight.py", "preflight dispatch invariants"),
     ),
     "my-coder": (
         ("src/mycoder/coder.py", "where the PR-open action is gated"),
