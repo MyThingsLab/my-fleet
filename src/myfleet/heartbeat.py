@@ -23,15 +23,19 @@ from pathlib import Path
 from mytelegrambot.transport import HTTPTelegramTransport
 from mythings.ledger import Ledger
 
+from myfleet.workspace import fleet_root
+
 TOOL = "fleet_cycle"
 KIND = "heartbeat"
 
-# Climbs myfleet/<file>.py -> src -> my-fleet -> MyThingsLab/ (the fleet root).
-# Deliberately not imported from fleet_dispatch.py: that module pulls in
-# myorchestrator and friends, weight this dead-man's-switch has no reason to
-# carry just to compute the same path fleet_dispatch.DISPATCH_LEDGER already
-# resolves to.
-WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
+# Still not imported from fleet_dispatch.py: that module pulls in myorchestrator
+# and friends, weight this dead-man's-switch has no reason to carry just to
+# compute the same path fleet_dispatch.DISPATCH_LEDGER already resolves to.
+# myfleet.workspace is the seam that exists for exactly this -- the bare
+# parents[3] climb resolves to a /tmp scratch prefix under an isolation
+# Workspace, which would point this at a ledger nobody writes and make a dead
+# fleet look alive.
+WORKSPACE_ROOT = fleet_root(__file__)
 DEFAULT_LEDGER = WORKSPACE_ROOT / ".fleet-dispatch" / "ledger.jsonl"
 
 # One tick per timer, given each timer's own cadence plus slack for one missed

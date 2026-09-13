@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -7,6 +8,27 @@ import pytest
 from mythings.ledger import Ledger
 
 import myfleet.heartbeat as hb
+from myfleet import workspace
+
+
+def test_the_default_ledger_follows_an_explicit_fleet_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The failure this guards is silent in the worst way: under an isolation
+    # Workspace the bare parents[3] climb lands in a /tmp scratch prefix, so the
+    # switch reads a ledger nobody writes, sees no heartbeat, and a dead fleet
+    # reports as alive. Both constants are module-level, so the reload is what
+    # makes this a test of heartbeat's own resolution rather than of the seam it
+    # calls -- assert against workspace.fleet_root directly and it passes just as
+    # happily with the parents[3] climb still in place.
+    monkeypatch.setenv(workspace.ROOT_ENV, str(tmp_path))
+    reloaded = importlib.reload(hb)
+    try:
+        assert reloaded.WORKSPACE_ROOT == tmp_path
+        assert reloaded.DEFAULT_LEDGER == tmp_path / ".fleet-dispatch" / "ledger.jsonl"
+    finally:
+        monkeypatch.delenv(workspace.ROOT_ENV, raising=False)
+        importlib.reload(hb)
 
 
 def test_last_heartbeat_none_when_never_recorded(tmp_path: Path) -> None:
