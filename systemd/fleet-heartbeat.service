@@ -1,6 +1,6 @@
 # Deployed on the Pi (lollinuxpi-server), checkout at ~/repos/MyThingsLab.
 [Unit]
-Description=MyThingsLab fleet bookkeeping cycle (no dispatch, no billed workers)
+Description=MyThingsLab fleet_cycle heartbeat check (#28 dead-man's-switch for fleet-cycle.timer/fleet-bookkeeping.timer)
 After=network-online.target
 Wants=network-online.target
 OnFailure=telegram-alert@%n.service
@@ -10,6 +10,5 @@ Type=oneshot
 User=lollinuxpi
 WorkingDirectory=/home/lollinuxpi/repos/MyThingsLab/my-fleet
 Environment=PATH=/home/lollinuxpi/repos/MyThingsLab/.venv/bin:/usr/bin:/bin
-Environment=FLEET_ACCOUNTS=/home/lollinuxpi/.claude-personal,/home/lollinuxpi/.claude-work
 EnvironmentFile=-/home/lollinuxpi/.config/mythingslab/telegram.env
-ExecStart=/home/lollinuxpi/repos/MyThingsLab/.venv/bin/python3 -m myfleet.fleet_cycle --accounts ${FLEET_ACCOUNTS} --execute --skip-dispatch --brief-count 0 --engine noop
+ExecStart=/home/lollinuxpi/repos/MyThingsLab/.venv/bin/python3 -m myfleet.heartbeat

@@ -40,7 +40,10 @@ def _account(config_dir: Path, settings: dict | None) -> fd.Account:
 _RTK_HOOK = {
     "hooks": {
         "PreToolUse": [
-            {"matcher": "Bash", "hooks": [{"type": "command", "command": "~/.claude/hooks/rtk-rewrite.sh"}]}
+            {
+                "matcher": "Bash",
+                "hooks": [{"type": "command", "command": "~/.claude/hooks/rtk-rewrite.sh"}],
+            }
         ]
     }
 }
@@ -97,7 +100,17 @@ def test_main_dispatches_accounts_concurrently(tmp_path: Path, monkeypatch) -> N
     calls_lock = threading.Lock()
 
     def fake_dispatch_one(
-        account, candidate, *, execute, max_budget_usd, max_turns, ledger, org, prior=None, ready_timeout=0.0, session_timeout_s=1800.0
+        account,
+        candidate,
+        *,
+        execute,
+        max_budget_usd,
+        max_turns,
+        ledger,
+        org,
+        prior=None,
+        ready_timeout=0.0,
+        session_timeout_s=1800.0,
     ):
         start = time.monotonic()
         time.sleep(0.2)
@@ -109,8 +122,12 @@ def test_main_dispatches_accounts_concurrently(tmp_path: Path, monkeypatch) -> N
     monkeypatch.setattr(fd, "_last_attempt", lambda *a, **k: None)
 
     candidates = [
-        fd.Candidate(id="repo#1", repo="repo", tool="", title="t1", kind="issue", created_at="2020-01-01"),
-        fd.Candidate(id="repo#2", repo="repo", tool="", title="t2", kind="issue", created_at="2020-01-02"),
+        fd.Candidate(
+            id="repo#1", repo="repo", tool="", title="t1", kind="issue", created_at="2020-01-01"
+        ),
+        fd.Candidate(
+            id="repo#2", repo="repo", tool="", title="t2", kind="issue", created_at="2020-01-02"
+        ),
     ]
 
     class FakeRecommendation:
@@ -144,7 +161,17 @@ def test_main_surfaces_every_account_failure_not_just_first(
     # dropping any other account's crash. Both accounts fail here on purpose;
     # both should still be reported.
     def fake_dispatch_one(
-        account, candidate, *, execute, max_budget_usd, max_turns, ledger, org, prior=None, ready_timeout=0.0, session_timeout_s=1800.0
+        account,
+        candidate,
+        *,
+        execute,
+        max_budget_usd,
+        max_turns,
+        ledger,
+        org,
+        prior=None,
+        ready_timeout=0.0,
+        session_timeout_s=1800.0,
     ):
         raise RuntimeError(f"boom-{account.name}")
 
@@ -152,8 +179,12 @@ def test_main_surfaces_every_account_failure_not_just_first(
     monkeypatch.setattr(fd, "_last_attempt", lambda *a, **k: None)
 
     candidates = [
-        fd.Candidate(id="repo#1", repo="repo", tool="", title="t1", kind="issue", created_at="2020-01-01"),
-        fd.Candidate(id="repo#2", repo="repo", tool="", title="t2", kind="issue", created_at="2020-01-02"),
+        fd.Candidate(
+            id="repo#1", repo="repo", tool="", title="t1", kind="issue", created_at="2020-01-01"
+        ),
+        fd.Candidate(
+            id="repo#2", repo="repo", tool="", title="t2", kind="issue", created_at="2020-01-02"
+        ),
     ]
 
     class FakeRecommendation:
@@ -181,8 +212,12 @@ def test_main_surfaces_every_account_failure_not_just_first(
 
 def test_critical_halt_issues_parses_gh_search_output(monkeypatch) -> None:
     payload = [
-        {"repository": {"nameWithOwner": "MyThingsLab/my-things-core"}, "number": 5,
-         "title": "auth bypass", "url": "https://github.com/MyThingsLab/my-things-core/issues/5"},
+        {
+            "repository": {"nameWithOwner": "MyThingsLab/my-things-core"},
+            "number": 5,
+            "title": "auth bypass",
+            "url": "https://github.com/MyThingsLab/my-things-core/issues/5",
+        },
     ]
 
     def fake_run(cmd, **kwargs):
@@ -204,8 +239,12 @@ def test_critical_halt_issues_empty_on_gh_failure(monkeypatch) -> None:
 
 def test_main_halts_dispatch_when_critical_issue_open(tmp_path: Path, monkeypatch, capsys) -> None:
     critical = [
-        {"repository": {"nameWithOwner": "MyThingsLab/my-things-core"}, "number": 5,
-         "title": "auth bypass", "url": "https://github.com/MyThingsLab/my-things-core/issues/5"},
+        {
+            "repository": {"nameWithOwner": "MyThingsLab/my-things-core"},
+            "number": 5,
+            "title": "auth bypass",
+            "url": "https://github.com/MyThingsLab/my-things-core/issues/5",
+        },
     ]
     monkeypatch.setattr(fd, "_critical_halt_issues", lambda org: critical)
     monkeypatch.setattr(fd, "DISPATCH_LEDGER", tmp_path / "ledger.jsonl")
@@ -233,7 +272,17 @@ def test_main_skips_issue_with_open_pr_in_flight(tmp_path: Path, monkeypatch) ->
     dispatched: list[str] = []
 
     def fake_dispatch_one(
-        account, candidate, *, execute, max_budget_usd, max_turns, ledger, org, prior=None, ready_timeout=0.0, session_timeout_s=1800.0
+        account,
+        candidate,
+        *,
+        execute,
+        max_budget_usd,
+        max_turns,
+        ledger,
+        org,
+        prior=None,
+        ready_timeout=0.0,
+        session_timeout_s=1800.0,
     ):
         dispatched.append(candidate.id)
 
@@ -241,8 +290,12 @@ def test_main_skips_issue_with_open_pr_in_flight(tmp_path: Path, monkeypatch) ->
     monkeypatch.setattr(fd, "_last_attempt", lambda *a, **k: None)
 
     candidates = [
-        fd.Candidate(id="repo#1", repo="repo", tool="", title="done", kind="issue", created_at="2020-01-01"),
-        fd.Candidate(id="repo#2", repo="repo", tool="", title="todo", kind="issue", created_at="2020-01-02"),
+        fd.Candidate(
+            id="repo#1", repo="repo", tool="", title="done", kind="issue", created_at="2020-01-01"
+        ),
+        fd.Candidate(
+            id="repo#2", repo="repo", tool="", title="todo", kind="issue", created_at="2020-01-02"
+        ),
     ]
 
     class FakeRecommendation:
@@ -322,8 +375,14 @@ def test_dispatch_decision(attempt, blocker_open: bool, expected: str) -> None:
 def test_last_attempt_reads_latest_terminal_and_counts_attempts(tmp_path: Path) -> None:
     led = Ledger(tmp_path / "l.jsonl")
     led.record("fleet_dispatch", "dispatch", "started", candidate="r#1", branch="b")
-    led.record("fleet_dispatch", "dispatch", "no_changes", candidate="r#1", branch="b",
-               final_message="stuck on ls")
+    led.record(
+        "fleet_dispatch",
+        "dispatch",
+        "no_changes",
+        candidate="r#1",
+        branch="b",
+        final_message="stuck on ls",
+    )
     led.record("fleet_dispatch", "dispatch", "started", candidate="r#1", branch="b")
     led.record("fleet_dispatch", "dispatch", "needs_review", candidate="r#1", branch="b", commits=1)
     led.record("fleet_dispatch", "dispatch", "success", candidate="other#2", branch="b2")
@@ -368,10 +427,22 @@ def test_failed_entry_with_transient_message_does_not_count(tmp_path: Path) -> N
     # existed (exactly the two rate-limited #17 runs in the live ledger): a
     # failure whose message is transient must not count toward the cap.
     led = Ledger(tmp_path / "l.jsonl")
-    led.record("fleet_dispatch", "dispatch", "failed", candidate="r#1", branch="b",
-               final_message="You've hit your session limit · resets 6pm")
-    led.record("fleet_dispatch", "dispatch", "failed", candidate="r#1", branch="b",
-               final_message="You've hit your session limit · resets 6pm")
+    led.record(
+        "fleet_dispatch",
+        "dispatch",
+        "failed",
+        candidate="r#1",
+        branch="b",
+        final_message="You've hit your session limit · resets 6pm",
+    )
+    led.record(
+        "fleet_dispatch",
+        "dispatch",
+        "failed",
+        candidate="r#1",
+        branch="b",
+        final_message="You've hit your session limit · resets 6pm",
+    )
 
     a = fd._last_attempt(led, "r#1")
     assert a is not None
@@ -391,7 +462,17 @@ def test_main_resumes_or_skips_by_prior_attempt(
     got: dict[str, object] = {}
 
     def fake_dispatch_one(
-        account, candidate, *, execute, max_budget_usd, max_turns, ledger, org, prior=None, ready_timeout=0.0, session_timeout_s=1800.0
+        account,
+        candidate,
+        *,
+        execute,
+        max_budget_usd,
+        max_turns,
+        ledger,
+        org,
+        prior=None,
+        ready_timeout=0.0,
+        session_timeout_s=1800.0,
     ):
         got[candidate.id] = prior
 
@@ -400,10 +481,18 @@ def test_main_resumes_or_skips_by_prior_attempt(
     monkeypatch.setattr(fd, "DISPATCH_LEDGER", tmp_path / "ledger.jsonl")
 
     candidates = [
-        fd.Candidate(id="r#1", repo="r", tool="", title="resume", kind="issue", created_at="2020-01-01"),
-        fd.Candidate(id="r#2", repo="r", tool="", title="blocked", kind="issue", created_at="2020-01-02"),
-        fd.Candidate(id="r#3", repo="r", tool="", title="capped", kind="issue", created_at="2020-01-03"),
-        fd.Candidate(id="r#4", repo="r", tool="", title="fresh", kind="issue", created_at="2020-01-04"),
+        fd.Candidate(
+            id="r#1", repo="r", tool="", title="resume", kind="issue", created_at="2020-01-01"
+        ),
+        fd.Candidate(
+            id="r#2", repo="r", tool="", title="blocked", kind="issue", created_at="2020-01-02"
+        ),
+        fd.Candidate(
+            id="r#3", repo="r", tool="", title="capped", kind="issue", created_at="2020-01-03"
+        ),
+        fd.Candidate(
+            id="r#4", repo="r", tool="", title="fresh", kind="issue", created_at="2020-01-04"
+        ),
     ]
 
     class FakeRecommendation:
@@ -436,7 +525,9 @@ def test_main_resumes_or_skips_by_prior_attempt(
     assert got["r#1"] is attempts["r#1"]  # resumed with its prior attempt
     assert got["r#4"] is None  # fresh
     # r#3 hitting the cap is recorded as needs_human so it stays skipped.
-    outcomes = [e.outcome for e in Ledger(tmp_path / "ledger.jsonl") if e.data.get("candidate") == "r#3"]
+    outcomes = [
+        e.outcome for e in Ledger(tmp_path / "ledger.jsonl") if e.data.get("candidate") == "r#3"
+    ]
     assert "needs_human" in outcomes
     # ...and a human is actually told, which is the point of needs_human. Pinned
     # here rather than left to happen: unstubbed, this path shelled out to the
@@ -621,7 +712,9 @@ def _dispatch_stub(calls: list) -> callable:
 
 def _wire_single_candidate_orchestrator(monkeypatch) -> None:
     candidates = [
-        fd.Candidate(id="repo#1", repo="repo", tool="", title="t1", kind="issue", created_at="2020-01-01"),
+        fd.Candidate(
+            id="repo#1", repo="repo", tool="", title="t1", kind="issue", created_at="2020-01-01"
+        ),
     ]
 
     class FakeRecommendation:
@@ -675,7 +768,13 @@ def test_main_dry_run_still_reports_when_halted(tmp_path: Path, monkeypatch, cap
 
 def _usage_entry(ledger: Ledger, *, cost_usd: float, ts: str) -> None:
     ledger.append(
-        LedgerEntry(tool="fleet_dispatch", kind="usage", outcome="success", ts=ts, data={"cost_usd": cost_usd})
+        LedgerEntry(
+            tool="fleet_dispatch",
+            kind="usage",
+            outcome="success",
+            ts=ts,
+            data={"cost_usd": cost_usd},
+        )
     )
 
 
@@ -712,7 +811,9 @@ def test_main_refuses_to_dispatch_over_daily_cap(tmp_path: Path, monkeypatch) ->
     monkeypatch.setattr(fd, "_last_attempt", lambda *a, **k: None)
 
     candidates = [
-        fd.Candidate(id="repo#1", repo="repo", tool="", title="t1", kind="issue", created_at="2020-01-01"),
+        fd.Candidate(
+            id="repo#1", repo="repo", tool="", title="t1", kind="issue", created_at="2020-01-01"
+        ),
     ]
 
     class FakeRecommendation:
@@ -732,10 +833,14 @@ def test_main_refuses_to_dispatch_over_daily_cap(tmp_path: Path, monkeypatch) ->
 
     rc = fd.main(
         [
-            "--accounts", str(tmp_path / "a"),
-            "--execute", "--allow-personal-token",
-            "--max-budget-usd", "3.0",
-            "--max-daily-usd", "20.0",
+            "--accounts",
+            str(tmp_path / "a"),
+            "--execute",
+            "--allow-personal-token",
+            "--max-budget-usd",
+            "3.0",
+            "--max-daily-usd",
+            "20.0",
         ]
     )
 
@@ -759,7 +864,9 @@ def test_main_dry_run_ignores_daily_cap(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(fd, "_last_attempt", lambda *a, **k: None)
 
     candidates = [
-        fd.Candidate(id="repo#1", repo="repo", tool="", title="t1", kind="issue", created_at="2020-01-01"),
+        fd.Candidate(
+            id="repo#1", repo="repo", tool="", title="t1", kind="issue", created_at="2020-01-01"
+        ),
     ]
 
     class FakeRecommendation:
@@ -793,9 +900,7 @@ def _gh_identity_stub(login: str = "someone"):
     return fake_run
 
 
-def test_effective_daily_cap_without_override_returns_default(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_effective_daily_cap_without_override_returns_default(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(fd, "DAILY_CAP_OVERRIDE", tmp_path / "override.json")
 
     assert fd._effective_daily_cap(20.0) == 20.0
@@ -872,9 +977,7 @@ def test_main_raise_daily_cap_writes_override_and_exits(tmp_path: Path, monkeypa
     assert data["day"] == datetime.now(fd.UTC).strftime("%Y-%m-%d")
 
 
-def test_main_pushes_spend_alert_once_when_threshold_crossed(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_main_pushes_spend_alert_once_when_threshold_crossed(tmp_path: Path, monkeypatch) -> None:
     dispatch_ledger_path = tmp_path / "ledger.jsonl"
     monkeypatch.setattr(fd, "DISPATCH_LEDGER", dispatch_ledger_path)
     ledger = Ledger(dispatch_ledger_path)
@@ -894,10 +997,14 @@ def test_main_pushes_spend_alert_once_when_threshold_crossed(
 
     rc = fd.main(
         [
-            "--accounts", str(tmp_path / "a"),
-            "--execute", "--allow-personal-token",
-            "--max-budget-usd", "1.0",
-            "--max-daily-usd", "20.0",
+            "--accounts",
+            str(tmp_path / "a"),
+            "--execute",
+            "--allow-personal-token",
+            "--max-budget-usd",
+            "1.0",
+            "--max-daily-usd",
+            "20.0",
         ]
     )
 
@@ -917,22 +1024,26 @@ def test_main_does_not_repush_spend_alert_same_day(tmp_path: Path, monkeypatch) 
     ledger = Ledger(dispatch_ledger_path)
     today = datetime.now(fd.UTC).strftime("%Y-%m-%d")
     _usage_entry(ledger, cost_usd=17.0, ts=f"{today}T00:00:00Z")
-    ledger.record(tool="fleet_dispatch", kind="spend_alert", outcome="success", detail="already sent")
+    ledger.record(
+        tool="fleet_dispatch", kind="spend_alert", outcome="success", detail="already sent"
+    )
 
     monkeypatch.setattr(fd.subprocess, "run", _gh_identity_stub())
     monkeypatch.setattr(fd, "_dispatch_one", _dispatch_stub([]))
     alert_calls: list = []
-    monkeypatch.setattr(
-        fd.fleet_ask, "alert_spend", lambda **kw: alert_calls.append(kw) or True
-    )
+    monkeypatch.setattr(fd.fleet_ask, "alert_spend", lambda **kw: alert_calls.append(kw) or True)
     _wire_single_candidate_orchestrator(monkeypatch)
 
     rc = fd.main(
         [
-            "--accounts", str(tmp_path / "a"),
-            "--execute", "--allow-personal-token",
-            "--max-budget-usd", "1.0",
-            "--max-daily-usd", "20.0",
+            "--accounts",
+            str(tmp_path / "a"),
+            "--execute",
+            "--allow-personal-token",
+            "--max-budget-usd",
+            "1.0",
+            "--max-daily-usd",
+            "20.0",
         ]
     )
 
@@ -1028,8 +1139,17 @@ def test_main_auto_resumes_a_blocked_candidate_once_its_blocker_closes(
     dispatched: list[tuple[str, fd.Attempt | None]] = []
 
     def fake_dispatch_one(
-        account, candidate, *, execute, max_budget_usd, max_turns, ledger, org,
-        prior=None, ready_timeout=0.0, session_timeout_s=1800.0,
+        account,
+        candidate,
+        *,
+        execute,
+        max_budget_usd,
+        max_turns,
+        ledger,
+        org,
+        prior=None,
+        ready_timeout=0.0,
+        session_timeout_s=1800.0,
     ):
         dispatched.append((candidate.id, prior))
 
@@ -1073,7 +1193,10 @@ def test_main_still_skips_a_blocked_candidate_whose_blocker_stays_open(
     monkeypatch.setattr(fd, "_preflight_distinct_accounts", lambda accounts: [])
     monkeypatch.setattr(fd, "_open_pr_number", lambda *a, **k: None)
     blocked = fd.Attempt(
-        candidate_id="repo#1", outcome="blocked", branch="mycoder/repo-1", attempt_number=1,
+        candidate_id="repo#1",
+        outcome="blocked",
+        branch="mycoder/repo-1",
+        attempt_number=1,
         blocker="MyThingsLab/my-guard#7",
     )
     monkeypatch.setattr(fd, "_last_attempt", lambda *a, **k: blocked)
@@ -1147,9 +1270,7 @@ def test_main_execute_refuses_personal_token_when_gh_not_authenticated(
 
     monkeypatch.setattr(fd, "Orchestrator", boom_orchestrator)
 
-    rc = fd.main(
-        ["--accounts", str(tmp_path / "a"), "--execute", "--allow-personal-token"]
-    )
+    rc = fd.main(["--accounts", str(tmp_path / "a"), "--execute", "--allow-personal-token"])
 
     assert rc == 1
     assert "gh auth status" in capsys.readouterr().out
@@ -1168,11 +1289,15 @@ def test_main_execute_proceeds_with_app_identity(tmp_path: Path, monkeypatch) ->
 
     rc = fd.main(
         [
-            "--accounts", str(tmp_path / "a"),
+            "--accounts",
+            str(tmp_path / "a"),
             "--execute",
-            "--app-id", "1",
-            "--app-installation-id", "2",
-            "--app-private-key", "/k.pem",
+            "--app-id",
+            "1",
+            "--app-installation-id",
+            "2",
+            "--app-private-key",
+            "/k.pem",
         ]
     )
 
@@ -1199,11 +1324,15 @@ def test_main_execute_refuses_app_installation_for_wrong_org(
 
     rc = fd.main(
         [
-            "--accounts", str(tmp_path / "a"),
+            "--accounts",
+            str(tmp_path / "a"),
             "--execute",
-            "--app-id", "1",
-            "--app-installation-id", "2",
-            "--app-private-key", "/k.pem",
+            "--app-id",
+            "1",
+            "--app-installation-id",
+            "2",
+            "--app-private-key",
+            "/k.pem",
         ]
     )
 
@@ -1250,10 +1379,14 @@ def test_main_mints_app_token_and_sets_gh_token_env(tmp_path: Path, monkeypatch,
 
     rc = fd.main(
         [
-            "--accounts", str(tmp_path / "a"),
-            "--app-id", "4260739",
-            "--app-installation-id", "145558758",
-            "--app-private-key", "/path/to/key.pem",
+            "--accounts",
+            str(tmp_path / "a"),
+            "--app-id",
+            "4260739",
+            "--app-installation-id",
+            "145558758",
+            "--app-private-key",
+            "/path/to/key.pem",
         ]
     )
 
@@ -1264,9 +1397,7 @@ def test_main_mints_app_token_and_sets_gh_token_env(tmp_path: Path, monkeypatch,
     assert "authenticating as the GitHub App" in out
 
 
-def test_main_without_app_flags_does_not_touch_gh_token_env(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_main_without_app_flags_does_not_touch_gh_token_env(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("GH_TOKEN", raising=False)
     monkeypatch.setattr(fd, "DISPATCH_LEDGER", tmp_path / "ledger.jsonl")
     monkeypatch.setattr(fd, "_dispatch_one", lambda *a, **k: None)
@@ -1277,7 +1408,9 @@ def test_main_without_app_flags_does_not_touch_gh_token_env(
     assert "GH_TOKEN" not in os.environ
 
 
-def _setup_dispatch_one_repo(tmp_path: Path, monkeypatch) -> tuple[fd.Candidate, fd.Account, Ledger]:
+def _setup_dispatch_one_repo(
+    tmp_path: Path, monkeypatch
+) -> tuple[fd.Candidate, fd.Account, Ledger]:
     repo_path = tmp_path / "repo"
     repo_path.mkdir()
     _init_git_repo(repo_path)
@@ -1326,8 +1459,13 @@ def test_dispatch_one_dry_run_never_calls_mycoder(tmp_path: Path, monkeypatch) -
     monkeypatch.setattr(fd.subprocess, "run", lambda argv, **k: calls.append(argv))
 
     fd._dispatch_one(
-        account, candidate, execute=False, max_budget_usd=1.0, max_turns=10,
-        ledger=ledger, org="MyThingsLab",
+        account,
+        candidate,
+        execute=False,
+        max_budget_usd=1.0,
+        max_turns=10,
+        ledger=ledger,
+        org="MyThingsLab",
     )
 
     assert calls == []
@@ -1349,8 +1487,14 @@ def test_dispatch_one_builds_mycoder_argv(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(fd.subprocess, "run", fake_run)
 
     fd._dispatch_one(
-        account, candidate, execute=True, max_budget_usd=2.5, max_turns=15,
-        ledger=ledger, org="MyThingsLab", session_timeout_s=900.0,
+        account,
+        candidate,
+        execute=True,
+        max_budget_usd=2.5,
+        max_turns=15,
+        ledger=ledger,
+        org="MyThingsLab",
+        session_timeout_s=900.0,
     )
 
     argv = captured["argv"]
@@ -1383,7 +1527,12 @@ def test_dispatch_one_passes_through_mycoder_outcomes(
     )
 
     fd._dispatch_one(
-        account, candidate, execute=True, max_budget_usd=1.0, max_turns=10, ledger=ledger,
+        account,
+        candidate,
+        execute=True,
+        max_budget_usd=1.0,
+        max_turns=10,
+        ledger=ledger,
         org="MyThingsLab",
     )
 
@@ -1398,7 +1547,12 @@ def test_dispatch_one_translates_failure_to_failed(tmp_path: Path, monkeypatch) 
     )
 
     fd._dispatch_one(
-        account, candidate, execute=True, max_budget_usd=1.0, max_turns=10, ledger=ledger,
+        account,
+        candidate,
+        execute=True,
+        max_budget_usd=1.0,
+        max_turns=10,
+        ledger=ledger,
         org="MyThingsLab",
     )
 
@@ -1411,12 +1565,18 @@ def test_dispatch_one_reclassifies_transient_failure_as_deferred(
 ) -> None:
     candidate, account, ledger = _setup_dispatch_one_repo(tmp_path, monkeypatch)
     monkeypatch.setattr(
-        fd.subprocess, "run",
+        fd.subprocess,
+        "run",
         _fake_mycoder_run(outcome="failure", detail="claude exited 1: session limit reached"),
     )
 
     fd._dispatch_one(
-        account, candidate, execute=True, max_budget_usd=1.0, max_turns=10, ledger=ledger,
+        account,
+        candidate,
+        execute=True,
+        max_budget_usd=1.0,
+        max_turns=10,
+        ledger=ledger,
         org="MyThingsLab",
     )
 
@@ -1427,15 +1587,22 @@ def test_dispatch_one_reclassifies_transient_failure_as_deferred(
 def test_dispatch_one_records_blocker_from_mycoder_result(tmp_path: Path, monkeypatch) -> None:
     candidate, account, ledger = _setup_dispatch_one_repo(tmp_path, monkeypatch)
     monkeypatch.setattr(
-        fd.subprocess, "run",
+        fd.subprocess,
+        "run",
         _fake_mycoder_run(
-            outcome="blocked", detail="paused on cross-repo blocker MyThingsLab/my-guard#7",
+            outcome="blocked",
+            detail="paused on cross-repo blocker MyThingsLab/my-guard#7",
             blocker="MyThingsLab/my-guard#7",
         ),
     )
 
     fd._dispatch_one(
-        account, candidate, execute=True, max_budget_usd=1.0, max_turns=10, ledger=ledger,
+        account,
+        candidate,
+        execute=True,
+        max_budget_usd=1.0,
+        max_turns=10,
+        ledger=ledger,
         org="MyThingsLab",
     )
 
@@ -1447,7 +1614,8 @@ def test_dispatch_one_records_blocker_from_mycoder_result(tmp_path: Path, monkey
 def test_dispatch_one_success_runs_the_readiness_gate(tmp_path: Path, monkeypatch) -> None:
     candidate, account, ledger = _setup_dispatch_one_repo(tmp_path, monkeypatch)
     monkeypatch.setattr(
-        fd.subprocess, "run",
+        fd.subprocess,
+        "run",
         _fake_mycoder_run(outcome="success", detail="opened draft PR #9", pr=9, tests_passed=True),
     )
     finalize_calls = []
@@ -1460,7 +1628,12 @@ def test_dispatch_one_success_runs_the_readiness_gate(tmp_path: Path, monkeypatc
     )
 
     fd._dispatch_one(
-        account, candidate, execute=True, max_budget_usd=1.0, max_turns=10, ledger=ledger,
+        account,
+        candidate,
+        execute=True,
+        max_budget_usd=1.0,
+        max_turns=10,
+        ledger=ledger,
         org="MyThingsLab",
     )
 
@@ -1481,8 +1654,14 @@ def test_dispatch_one_records_deferred_on_timeout(tmp_path: Path, monkeypatch) -
     monkeypatch.setattr(fd.subprocess, "run", fake_run)
 
     fd._dispatch_one(
-        account, candidate, execute=True, max_budget_usd=1.0, max_turns=10, ledger=ledger,
-        org="MyThingsLab", session_timeout_s=5.0,
+        account,
+        candidate,
+        execute=True,
+        max_budget_usd=1.0,
+        max_turns=10,
+        ledger=ledger,
+        org="MyThingsLab",
+        session_timeout_s=5.0,
     )
 
     (entry,) = [e for e in ledger.read() if e.kind == "dispatch" and e.outcome != "started"]
@@ -1497,13 +1676,20 @@ def test_dispatch_one_treats_unparseable_mycoder_output_as_failed(
 
     def fake_run(argv, **kwargs):
         if argv[0] == "mycoder":
-            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="mycoder: command not found")
+            return subprocess.CompletedProcess(
+                argv, 1, stdout="", stderr="mycoder: command not found"
+            )
         return _REAL_SUBPROCESS_RUN(argv, **kwargs)
 
     monkeypatch.setattr(fd.subprocess, "run", fake_run)
 
     fd._dispatch_one(
-        account, candidate, execute=True, max_budget_usd=1.0, max_turns=10, ledger=ledger,
+        account,
+        candidate,
+        execute=True,
+        max_budget_usd=1.0,
+        max_turns=10,
+        ledger=ledger,
         org="MyThingsLab",
     )
 
@@ -1514,12 +1700,18 @@ def test_dispatch_one_treats_unparseable_mycoder_output_as_failed(
 def test_dispatch_one_records_minimal_usage_entry(tmp_path: Path, monkeypatch) -> None:
     candidate, account, ledger = _setup_dispatch_one_repo(tmp_path, monkeypatch)
     monkeypatch.setattr(
-        fd.subprocess, "run",
+        fd.subprocess,
+        "run",
         _fake_mycoder_run(outcome="no_changes", detail="nothing to do", cost_usd=0.42),
     )
 
     fd._dispatch_one(
-        account, candidate, execute=True, max_budget_usd=1.0, max_turns=10, ledger=ledger,
+        account,
+        candidate,
+        execute=True,
+        max_budget_usd=1.0,
+        max_turns=10,
+        ledger=ledger,
         org="MyThingsLab",
     )
 
@@ -1527,11 +1719,14 @@ def test_dispatch_one_records_minimal_usage_entry(tmp_path: Path, monkeypatch) -
     assert usage.data["cost_usd"] == 0.42
 
 
-def test_main_scaffolds_do_not_consume_slots_when_issues_exist(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_main_scaffolds_do_not_consume_slots_when_issues_exist(tmp_path: Path, monkeypatch) -> None:
     scaffold = fd.Candidate(
-        id="scaffold:my-scaffold", repo="my-scaffold", tool="", title="t0", kind="scaffold", created_at="2020-01-01"
+        id="scaffold:my-scaffold",
+        repo="my-scaffold",
+        tool="",
+        title="t0",
+        kind="scaffold",
+        created_at="2020-01-01",
     )
     issue = fd.Candidate(
         id="repo#1", repo="repo", tool="", title="t1", kind="issue", created_at="2020-01-01"
@@ -1570,7 +1765,12 @@ def test_main_records_no_dispatchable_candidates_when_only_scaffolds(
     monkeypatch.setattr(fd, "DISPATCH_LEDGER", dispatch_ledger_path)
 
     scaffold = fd.Candidate(
-        id="scaffold:my-scaffold", repo="my-scaffold", tool="", title="t0", kind="scaffold", created_at="2020-01-01"
+        id="scaffold:my-scaffold",
+        repo="my-scaffold",
+        tool="",
+        title="t0",
+        kind="scaffold",
+        created_at="2020-01-01",
     )
 
     class FakeRecommendation:
@@ -1597,9 +1797,7 @@ def test_main_records_no_dispatchable_candidates_when_only_scaffolds(
     assert any(e.outcome == "no_dispatchable_candidates" for e in entries)
 
 
-def test_main_records_backlog_empty_when_no_candidates(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_main_records_backlog_empty_when_no_candidates(tmp_path: Path, monkeypatch) -> None:
     dispatch_ledger_path = tmp_path / "ledger.jsonl"
     monkeypatch.setattr(fd, "DISPATCH_LEDGER", dispatch_ledger_path)
 
@@ -1629,7 +1827,9 @@ def test_dispatch_one_uses_gemini_runner_when_provider_is_gemini(
 
     def fake_run(argv, **kwargs):
         captured_argv.extend(argv)
-        return subprocess.CompletedProcess(argv, 0, stdout=json.dumps({"outcome": "no_changes", "detail": "ok"}), stderr="")
+        return subprocess.CompletedProcess(
+            argv, 0, stdout=json.dumps({"outcome": "no_changes", "detail": "ok"}), stderr=""
+        )
 
     monkeypatch.setattr(fd.subprocess, "run", fake_run)
 
@@ -1648,3 +1848,113 @@ def test_dispatch_one_uses_gemini_runner_when_provider_is_gemini(
     assert captured_argv[idx + 1] == "gemini"
 
 
+def test_active_worker_blackboard_register_and_deregister(tmp_path: Path) -> None:
+    path = tmp_path / "active_workers.json"
+    assert fd._read_active_workers(path) == {}
+
+    fd._register_worker("account1", "my-things-core#150", "my-things-core", path=path)
+    workers = fd._read_active_workers(path)
+    assert "account1" in workers
+    assert workers["account1"]["candidate"] == "my-things-core#150"
+    assert workers["account1"]["repo"] == "my-things-core"
+
+    fd._register_worker("account2", "my-tester#9", "my-tester", path=path)
+    workers = fd._read_active_workers(path)
+    assert len(workers) == 2
+    assert workers["account2"]["candidate"] == "my-tester#9"
+
+    fd._deregister_worker("account1", path=path)
+    workers = fd._read_active_workers(path)
+    assert "account1" not in workers
+    assert "account2" in workers
+
+    fd._deregister_worker("account2", path=path)
+    assert fd._read_active_workers(path) == {}
+
+
+def test_active_worker_blackboard_cleanup_stale_leases(tmp_path: Path) -> None:
+    path = tmp_path / "active_workers.json"
+    old_time = "2026-09-13T10:00:00+00:00"
+    fresh_time = "2026-09-13T16:00:00+00:00"
+    now = datetime.fromisoformat("2026-09-13T17:00:00+00:00")
+
+    fd._register_worker("account1", "repo#1", "repo", started_at=old_time, path=path)
+    fd._register_worker("account2", "repo#2", "repo", started_at=fresh_time, path=path)
+
+    # max_age_s = 3600 (1 hour): account1 is 7h old (stale), account2 is 1h old (fresh)
+    removed = fd._cleanup_stale_leases(max_age_s=3600.0, now=now, path=path)
+    assert removed == 1
+    workers = fd._read_active_workers(path)
+    assert "account1" not in workers
+    assert "account2" in workers
+
+    # force_all clears everything
+    fd._cleanup_stale_leases(force_all=True, path=path)
+    assert fd._read_active_workers(path) == {}
+
+
+def test_active_fleet_context_formats_siblings(tmp_path: Path) -> None:
+    path = tmp_path / "active_workers.json"
+    fd._register_worker("account1", "my-things-core#150", "my-things-core", path=path)
+    fd._register_worker("account2", "my-tester#9", "my-tester", path=path)
+
+    # account1 sees account2
+    ctx1 = fd._active_fleet_context("account1", path=path)
+    assert "Active Fleet Context:" in ctx1
+    assert "Worker 'account2': my-tester#9" in ctx1
+    assert "Worker 'account1'" not in ctx1
+
+    # account2 sees account1
+    ctx2 = fd._active_fleet_context("account2", path=path)
+    assert "Worker 'account1': my-things-core#150" in ctx2
+    assert "Worker 'account2'" not in ctx2
+
+    # A lone worker sees empty context
+    fd._deregister_worker("account1", path=path)
+    assert fd._active_fleet_context("account2", path=path) == ""
+
+
+def test_dispatch_one_registers_worker_and_passes_context(tmp_path: Path, monkeypatch) -> None:
+    candidate, account, ledger = _setup_dispatch_one_repo(tmp_path, monkeypatch)
+    blackboard_path = tmp_path / "active_workers.json"
+    monkeypatch.setattr(fd, "ACTIVE_WORKERS_FILE", blackboard_path)
+
+    # Pre-register a sibling worker
+    fd._register_worker("account2", "sibling-repo#5", "sibling-repo", path=blackboard_path)
+
+    captured_env = {}
+
+    def fake_run(argv, **kwargs):
+        if argv[0] == "mycoder":
+            captured_env.update(kwargs.get("env", {}))
+            # Verify account1 was registered on the blackboard during run
+            active = fd._read_active_workers(blackboard_path)
+            assert "account1" in active
+            assert active["account1"]["candidate"] == candidate.id
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=json.dumps({"outcome": "success", "detail": "pr opened", "pr": 1}),
+            )
+        return _REAL_SUBPROCESS_RUN(argv, **kwargs)
+
+    monkeypatch.setattr(fd.subprocess, "run", fake_run)
+
+    fd._dispatch_one(
+        account,
+        candidate,
+        execute=True,
+        max_budget_usd=1.0,
+        max_turns=10,
+        ledger=ledger,
+        org="MyThingsLab",
+    )
+
+    # After _dispatch_one finishes, account1 should be deregistered, sibling retained
+    active = fd._read_active_workers(blackboard_path)
+    assert "account1" not in active
+    assert "account2" in active
+
+    # Verify MYTHINGS_FLEET_CONTEXT was passed to the worker env
+    assert "MYTHINGS_FLEET_CONTEXT" in captured_env
+    assert "sibling-repo#5" in captured_env["MYTHINGS_FLEET_CONTEXT"]
