@@ -1958,3 +1958,106 @@ def test_dispatch_one_registers_worker_and_passes_context(tmp_path: Path, monkey
     # Verify MYTHINGS_FLEET_CONTEXT was passed to the worker env
     assert "MYTHINGS_FLEET_CONTEXT" in captured_env
     assert "sibling-repo#5" in captured_env["MYTHINGS_FLEET_CONTEXT"]
+
+
+def test_ensure_repo_graph_builds_and_caches(tmp_path: Path) -> None:
+    repo_path = tmp_path / "my-tool"
+    repo_path.mkdir()
+    _init_git_repo(repo_path)
+
+    # Add python source and markdown documentation
+    pkg_dir = repo_path / "src" / "mytool"
+    pkg_dir.mkdir(parents=True)
+    (pkg_dir / "worker.py").write_text("def do_work() -> int:\n    return 42\n")
+    doc_dir = repo_path / "docs"
+    doc_dir.mkdir(parents=True)
+    (doc_dir / "adr.md").write_text("# ADR 001\n`do_work` is fast.\n")
+
+    subprocess.run(["git", "-C", str(repo_path), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo_path), "commit", "-qm", "add code and docs"], check=True)
+    head_sha = subprocess.run(
+        ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+    db_path = fd._ensure_repo_graph(repo_path)
+    assert db_path is not None
+    assert db_path.exists()
+    assert (repo_path / ".mythings" / "graph.meta.json").exists()
+
+    meta = json.loads((repo_path / ".mythings" / "graph.meta.json").read_text())
+    assert meta["commit_sha"] == head_sha
+
+    from mythings.graph import CodebaseGraph
+    graph = CodebaseGraph(db_path)
+    symbols = graph.find_symbols("do_work")
+    assert len(symbols) == 1
+    assert symbols[0].name == "do_work"
+    graph.close()
+
+    # Second call returns cached path without rebuild
+    db_path_cached = fd._ensure_repo_graph(repo_path)
+    assert db_path_cached == db_path
+
+    # New commit updates cache
+    (pkg_dir / "worker.py").write_text("def do_work() -> int:\n    return 100\ndef new_fn(): pass\n")
+    subprocess.run(["git", "-C", str(repo_path), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo_path), "commit", "-qm", "update"], check=True)
+    new_sha = subprocess.run(
+        ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert new_sha != head_sha
+
+    db_path_updated = fd._ensure_repo_graph(repo_path)
+    assert db_path_updated == db_path
+    meta_updated = json.loads((repo_path / ".mythings" / "graph.meta.json").read_text())
+    assert meta_updated["commit_sha"] == new_sha
+
+    graph_updated = CodebaseGraph(db_path)
+    assert len(graph_updated.find_symbols("new_fn")) == 1
+    graph_updated.close()
+
+
+def test_dispatch_one_injects_graph_path(tmp_path: Path, monkeypatch) -> None:
+    candidate, account, ledger = _setup_dispatch_one_repo(tmp_path, monkeypatch)
+    repo_path = tmp_path / "repo"
+
+    src_dir = repo_path / "src" / "repo"
+    src_dir.mkdir(parents=True)
+    (src_dir / "core.py").write_text("def helper(): pass\n")
+    subprocess.run(["git", "-C", str(repo_path), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo_path), "commit", "-qm", "add core"], check=True)
+
+    captured_env = {}
+
+    def fake_run(argv, **kwargs):
+        if argv[0] == "mycoder":
+            captured_env.update(kwargs.get("env", {}))
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=json.dumps({"outcome": "success", "detail": "pr opened", "pr": 1}),
+            )
+        return _REAL_SUBPROCESS_RUN(argv, **kwargs)
+
+    monkeypatch.setattr(fd.subprocess, "run", fake_run)
+
+    fd._dispatch_one(
+        account,
+        candidate,
+        execute=True,
+        max_budget_usd=1.0,
+        max_turns=10,
+        ledger=ledger,
+        org="MyThingsLab",
+    )
+
+    assert "MYTHINGS_GRAPH_PATH" in captured_env
+    graph_file = Path(captured_env["MYTHINGS_GRAPH_PATH"])
+    assert graph_file.exists()
+    assert graph_file.name == "graph.sqlite"

@@ -29,9 +29,17 @@ jobs:
       # from the same owner (not on PyPI): the orchestrator, the merge guard,
       # the Telegram transport used by the ASK channel, the tool-chaining
       # graph fleet_cycle ticks, and the worker CLI fleet_dispatch shells out
-      # to. my-things-core and my-guard are v1 (pinned per RELEASE.md);
-      # my-orchestrator, my-telegram-bot, my-pipeline, and my-coder are still
-      # v0 and float on @main.
+      # to. my-guard is v1 and pinned per RELEASE.md; my-orchestrator,
+      # my-telegram-bot, my-pipeline, and my-coder are v0 and float on @main.
+      #
+      # my-things-core is v1 too, so RELEASE.md wants an exact tag here — but
+      # there is no tag to pin to. Core's pyproject is at 1.2.0 while its only
+      # tag is v1.0.0, and its CHANGELOG carries two different [1.2.0] entries
+      # (605cda5 added mythings.session, then 89a3340 reranked
+      # labels.sort_key without bumping), so no tag names the code we need.
+      # @main is the deliberate stopgap: v1.0.0 predates mythings.labels, which
+      # my-orchestrator@main imports, so pinning it red-lines this repo.
+      # Restore the pin once core tags a release.
       - name: Install
         run: |
           pip install "my-things-core @ git+https://github.com/${{ github.repository_owner }}/my-things-core@main"

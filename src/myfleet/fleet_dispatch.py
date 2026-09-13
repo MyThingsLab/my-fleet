@@ -57,17 +57,14 @@ from mythings.github import app_installation_org, github_app_token
 from mythings.ledger import Ledger
 
 import myfleet.fleet_ask as fleet_ask
-from myfleet.workspace import ROOT_ENV, fleet_root
+from myfleet.workspace import ROOT_ENV, fleet_root, ledger_path, runtime_dir
 
 # Climbs myfleet/<file>.py -> src -> my-fleet -> MyThingsLab/ (the fleet root),
 # unless $MYTHINGS_WORKSPACE_ROOT says otherwise -- the climb lands in a scratch
 # dir when this module is imported from a Workspace worktree (#48).
 WORKSPACE_ROOT = fleet_root(__file__)
-# Runtime state for the dispatch loop. Named .my-fleet/ after this repo; it was
-# .fleet-dispatch/ back when the scripts lived in the workspace-root repo of
-# that name, which is now archived.
-RUNTIME_DIR = WORKSPACE_ROOT / ".my-fleet"
-DISPATCH_LEDGER = RUNTIME_DIR / "ledger.jsonl"
+RUNTIME_DIR = runtime_dir(WORKSPACE_ROOT)
+DISPATCH_LEDGER = ledger_path(WORKSPACE_ROOT)
 TRANSCRIPTS_DIR = RUNTIME_DIR / "transcripts"
 # The kill switch: a marker file, not a signal or a flag a running process has
 # to poll mid-loop. `--execute` checks for it before launching anything and
@@ -625,6 +622,68 @@ def _fresh_base_ref(repo_path: Path) -> str:
     return "main"
 
 
+def _ensure_repo_graph(repo_path: Path) -> Path | None:
+    """Ensure the target repository's deterministic codebase graph is indexed and cached by commit SHA."""
+    try:
+        from mythings.graph import CodebaseGraph, MarkdownExtractor, PythonAstExtractor
+    except ImportError:
+        return None
+
+    if not repo_path.is_dir() or not (repo_path / ".git").exists():
+        return None
+
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        head_sha = proc.stdout.strip()
+    except Exception:
+        return None
+
+    cache_dir = repo_path / ".mythings"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    db_path = cache_dir / "graph.sqlite"
+    meta_path = cache_dir / "graph.meta.json"
+
+    if db_path.exists() and meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            if meta.get("commit_sha") == head_sha:
+                return db_path
+        except Exception:
+            pass
+
+    temp_db = cache_dir / "graph.sqlite.tmp"
+    if temp_db.exists():
+        try:
+            temp_db.unlink()
+        except OSError:
+            pass
+
+    try:
+        graph = CodebaseGraph(temp_db)
+        PythonAstExtractor(repo_root=repo_path).index_repo(graph)
+        MarkdownExtractor(repo_root=repo_path).index_docs(graph)
+        graph.close()
+        temp_db.replace(db_path)
+        meta_data = {
+            "commit_sha": head_sha,
+            "indexed_at": datetime.now(UTC).isoformat(),
+        }
+        meta_path.write_text(json.dumps(meta_data), encoding="utf-8")
+        return db_path
+    except Exception:
+        if temp_db.exists():
+            try:
+                temp_db.unlink()
+            except OSError:
+                pass
+        return None
+
+
 def _mycoder_branch(candidate: Candidate) -> str:
     # Mirrors my-coder's own naming (Coder._attempt: f"{TOOL}/{self._repo_name()}
     # -{issue.number}"), so the "already has an open PR in flight" dedup check
@@ -712,12 +771,15 @@ def _dispatch_one(
         # translates the result into the outcome vocabulary _dispatch_decision
         # already knows.
         _fresh_base_ref(repo_path)  # best-effort fetch; see its docstring
+        graph_db = _ensure_repo_graph(repo_path)
         TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
         env = {
             **os.environ,
             "CLAUDE_CONFIG_DIR": str(account.config_dir),
             "GEMINI_CONFIG_DIR": str(account.config_dir),
         }
+        if graph_db is not None:
+            env["MYTHINGS_GRAPH_PATH"] = str(graph_db)
         fleet_ctx = _active_fleet_context(account.name)
         if fleet_ctx:
             env["MYTHINGS_FLEET_CONTEXT"] = fleet_ctx
