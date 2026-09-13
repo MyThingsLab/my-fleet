@@ -51,15 +51,28 @@ def looks_like_fleet_root(path: Path) -> bool:
     return all((path / marker).is_dir() for marker in _MARKERS)
 
 
-def fleet_root(module_file: str) -> Path:
-    # Deliberately not validated-or-raise. CI checks out this repo alone, with
-    # no sibling tools, so no candidate passes `looks_like_fleet_root` there and
-    # raising at import would take the suite down. The env var is the fix for
-    # the case that actually hurt; the climb stays the fallback it always was.
+class InvalidFleetRoot(RuntimeError):
+    pass
+
+
+def fleet_root(module_file: str, *, validate: bool = False) -> Path:
+    # `validate` defaults to False because most callers bind their result to a
+    # module-level constant at import time (`WORKSPACE_ROOT = fleet_root(...)`),
+    # and CI checks out this repo alone with no sibling tools -- no candidate
+    # passes `looks_like_fleet_root` there, so raising unconditionally would take
+    # the suite down on every import. `validate=True` is for a caller that
+    # resolves the root lazily, on the call that actually needs it (my-fleet#48)
+    # -- there, a candidate that doesn't look like a real fleet root is a bug
+    # worth crashing on, not a plausible-looking wrong path to silently return.
     override = os.environ.get(ROOT_ENV, "").strip()
-    if override:
-        return Path(override).resolve()
-    return Path(module_file).resolve().parents[3]
+    root = Path(override).resolve() if override else Path(module_file).resolve().parents[3]
+    if validate and not looks_like_fleet_root(root):
+        raise InvalidFleetRoot(
+            f"{root} does not look like a MyThingsLab fleet root (expected a "
+            f"{' and '.join(_MARKERS)} checkout under it). Set ${ROOT_ENV} to the "
+            "real fleet root."
+        )
+    return root
 
 
 def runtime_dir(root: Path) -> Path:

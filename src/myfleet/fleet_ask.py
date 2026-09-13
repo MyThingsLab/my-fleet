@@ -21,24 +21,35 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from myfleet.workspace import fleet_root
+from myfleet.workspace import InvalidFleetRoot, fleet_root
 
-# Climbs myfleet/<file>.py -> src -> my-fleet -> MyThingsLab/ (the fleet root),
-# unless $MYTHINGS_WORKSPACE_ROOT says otherwise -- the climb lands in a scratch
-# dir when this module is imported from a Workspace worktree (#48).
-WORKSPACE_ROOT = fleet_root(__file__)
 
-# `mytelegrambot run` (the daemon) resolves its ledger relative to its own
-# WorkingDirectory, which the systemd unit sets to the bot's repo -- so this is
-# the file it writes callback entries to.
-#
-# This path is the whole ballgame. `mytelegrambot ask` blocks waiting for a
-# `kind=callback` entry that the *daemon* writes; the two processes rendezvous
-# through this file and nothing else. Point `ask` at a different ledger -- which
-# its cwd-relative default silently does, since a worker runs in a git worktree --
-# and every prompt is sent, nobody's tap is ever seen, and every ASK times out
-# into a DENY. Absolute, always.
-BOT_LEDGER = WORKSPACE_ROOT / "my-telegram-bot" / ".mythings" / "ledger.jsonl"
+def bot_ledger() -> Path:
+    """Where `mytelegrambot run` (the daemon) writes ASK callback taps.
+
+    The daemon resolves its ledger relative to its own WorkingDirectory, which
+    the systemd unit sets to the bot's repo -- so this is the file it writes
+    callback entries to.
+
+    This path is the whole ballgame. `mytelegrambot ask` blocks waiting for a
+    `kind=callback` entry that the *daemon* writes; the two processes rendezvous
+    through this file and nothing else. Point `ask` at a different ledger -- which
+    its cwd-relative default silently does, since a worker runs in a git worktree --
+    and every prompt is sent, nobody's tap is ever seen, and every ASK times out
+    into a DENY. Absolute, always.
+
+    Resolved lazily on every call rather than bound to a module-level constant at
+    import time: importing this module from a `Workspace` worktree climbs
+    `myfleet/fleet_ask.py -> src -> my-fleet -> MyThingsLab/` and lands in the
+    scratch dir instead (`<prefix>/tree/src/myfleet/fleet_ask.py` -> `<prefix>`),
+    and a constant bound then is wrong for the rest of the process with no way
+    for a later caller to correct it (my-fleet#48). `validate=True` makes
+    `fleet_root` raise on a candidate that doesn't look like a real fleet root
+    instead of handing back a plausible-looking wrong path -- unless
+    $MYTHINGS_WORKSPACE_ROOT says where the real root is, which `fleet_dispatch`
+    already arms for every worker it spawns.
+    """
+    return fleet_root(__file__, validate=True) / "my-telegram-bot" / ".mythings" / "ledger.jsonl"
 
 # Per-ask ceiling. A human has to notice a phone notification and answer, so it
 # cannot be short; but every ASK in a cycle costs up to this much wall-clock, so
@@ -76,9 +87,10 @@ def ask_binary() -> Path | None:
 
 
 def ask_command(
-    *, ledger: Path = BOT_LEDGER, timeout: int = DEFAULT_ASK_TIMEOUT
+    *, ledger: Path | None = None, timeout: int = DEFAULT_ASK_TIMEOUT
 ) -> str:
     binary = ask_binary() or Path("mytelegrambot")
+    ledger = bot_ledger() if ledger is None else ledger
     return f"{binary} ask --ledger {ledger} --timeout {timeout}"
 
 
@@ -136,7 +148,7 @@ def daemon_is_running(*, proc_root: Path = Path("/proc")) -> bool:
 
 
 def ask_env(
-    *, ledger: Path = BOT_LEDGER, timeout: int = DEFAULT_ASK_TIMEOUT
+    *, ledger: Path | None = None, timeout: int = DEFAULT_ASK_TIMEOUT
 ) -> dict[str, str]:
     return {
         "MYTHINGS_ASK_CMD": ask_command(ledger=ledger, timeout=timeout),
@@ -148,7 +160,7 @@ def ask_env(
 
 def enable(
     *,
-    ledger: Path = BOT_LEDGER,
+    ledger: Path | None = None,
     timeout: int = DEFAULT_ASK_TIMEOUT,
     remote_daemon: bool = False,
     env: dict[str, str] | None = None,
@@ -163,6 +175,7 @@ def enable(
     # nothing in the output to say why. Better to stop here than to spend an hour
     # denying everything.
     env = os.environ if env is None else env
+    ledger = bot_ledger() if ledger is None else ledger
 
     # Every precondition below has the same failure mode, and it is a nasty one: the
     # ask subprocess dies, MyGuard reads any non-zero exit as a DENY, and the caller
@@ -224,10 +237,11 @@ _NOTIFY_TIMEOUT = 30
 
 
 def alert_spend(
-    *, spent: float, cap: float, raise_to: float, ledger: Path = BOT_LEDGER
+    *, spent: float, cap: float, raise_to: float, ledger: Path | None = None
 ) -> bool:
     binary = ask_binary() or Path("mytelegrambot")
     try:
+        ledger = bot_ledger() if ledger is None else ledger
         proc = subprocess.run(
             [
                 str(binary), "alert-spend",
@@ -238,16 +252,17 @@ def alert_spend(
             ],
             capture_output=True, text=True, timeout=_NOTIFY_TIMEOUT,
         )
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError, InvalidFleetRoot):
         return False
     return proc.returncode == 0
 
 
 def escalate_blocker(
-    *, candidate: str, detail: str, attempt: int, ledger: Path = BOT_LEDGER
+    *, candidate: str, detail: str, attempt: int, ledger: Path | None = None
 ) -> bool:
     binary = ask_binary() or Path("mytelegrambot")
     try:
+        ledger = bot_ledger() if ledger is None else ledger
         proc = subprocess.run(
             [
                 str(binary), "escalate-blocker",
@@ -258,6 +273,6 @@ def escalate_blocker(
             ],
             capture_output=True, text=True, timeout=_NOTIFY_TIMEOUT,
         )
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError, InvalidFleetRoot):
         return False
     return proc.returncode == 0
