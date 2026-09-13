@@ -125,7 +125,7 @@ python3 -m myfleet.fleet_dispatch --abort        # arm it: no --accounts needed
 python3 -m myfleet.fleet_dispatch --clear-halt   # disarm it once it's safe to resume
 ```
 
-`--abort` touches a marker file (`.fleet-dispatch/HALT` under the fleet
+`--abort` touches a marker file (`.my-fleet/HALT` under the fleet
 root); every `--execute` run checks for it before launching a single session
 and refuses outright if it's there (a dry run still reports normally, just
 with a note). Since `fleet_cycle` shells out to `fleet_dispatch` for its
