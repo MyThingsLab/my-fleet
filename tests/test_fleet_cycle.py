@@ -698,3 +698,63 @@ def test_main_loop_flag_dispatches_to_run_loop(monkeypatch: pytest.MonkeyPatch) 
     rc = fc.main(["--accounts", "/tmp/acct", "--loop", "--max-duration-min", "5"])
     assert rc == 0
     assert captured == {"accounts": "/tmp/acct", "max_duration_min": 5.0}
+
+
+def test_main_concurrency_flag_passed(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_cycle(args: argparse.Namespace, **kw: object) -> None:
+        captured["concurrency"] = args.concurrency
+
+    monkeypatch.setattr(fc, "_run_cycle", fake_run_cycle)
+    rc = fc.main(["--accounts", "/tmp/acct", "-j", "4"])
+    assert rc == 0
+    assert captured["concurrency"] == 4
+
+
+def test_execute_wave_sequential(capsys: pytest.CaptureFixture[str]) -> None:
+    calls: list[str] = []
+    stages = [
+        fc.Stage("stage-1", ["echo", "1"], mutating=False),
+        fc.Stage("stage-2", ["echo", "2"], mutating=False),
+    ]
+
+    def fake_execute_stage(stage: fc.Stage, *, execute: bool) -> None:
+        calls.append(stage.name)
+        print(f"ran {stage.name}")
+
+    original_execute_stage = fc._execute_stage
+    try:
+        fc._execute_stage = fake_execute_stage  # type: ignore[assignment]
+        fc._execute_wave(stages, execute=False, concurrency=1)
+    finally:
+        fc._execute_stage = original_execute_stage  # type: ignore[assignment]
+
+    assert calls == ["stage-1", "stage-2"]
+    out = capsys.readouterr().out
+    assert "ran stage-1\nran stage-2\n" in out
+    assert "--- [" not in out
+
+
+def test_execute_wave_concurrent(capsys: pytest.CaptureFixture[str]) -> None:
+    stages = [
+        fc.Stage("tool-a", ["cmd-a"], mutating=False),
+        fc.Stage("tool-b", ["cmd-b"], mutating=False),
+    ]
+
+    def fake_execute_stage(stage: fc.Stage, *, execute: bool) -> None:
+        print(f"output from {stage.name}")
+
+    original_execute_stage = fc._execute_stage
+    try:
+        fc._execute_stage = fake_execute_stage  # type: ignore[assignment]
+        fc._execute_wave(stages, execute=False, concurrency=2)
+    finally:
+        fc._execute_stage = original_execute_stage  # type: ignore[assignment]
+
+    out = capsys.readouterr().out
+    assert "--- [tool-a] ---" in out
+    assert "output from tool-a" in out
+    assert "--- [tool-b] ---" in out
+    assert "output from tool-b" in out
+

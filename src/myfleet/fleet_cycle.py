@@ -47,12 +47,15 @@ indefinitely, relying on Restart=on-failure for crash recovery.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
+import io
 import json
 import os
 import subprocess
 import sys
 import time
 from collections.abc import Callable
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -437,6 +440,41 @@ def _execute_stage(stage: Stage, *, execute: bool) -> None:
     _run(stage.argv, env=stage.env)
 
 
+def _execute_stage_buffered(stage: Stage, *, execute: bool) -> tuple[Stage, str, int]:
+    # Capture output per stage so concurrent stages don't scramble each other's stdout/stderr
+    buf = io.StringIO()
+    rc = 0
+    with redirect_stdout(buf), redirect_stderr(buf):
+        try:
+            _execute_stage(stage, execute=execute)
+        except Exception as exc:
+            print(f"Error executing {stage.name}: {exc}", file=sys.stderr)
+            rc = 1
+    return stage, buf.getvalue(), rc
+
+
+def _execute_wave(
+    stages: list[Stage], *, execute: bool, concurrency: int = 1
+) -> None:
+    if len(stages) <= 1 or concurrency <= 1:
+        for stage in stages:
+            _execute_stage(stage, execute=execute)
+        return
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
+        futures = [
+            executor.submit(_execute_stage_buffered, stage, execute=execute)
+            for stage in stages
+        ]
+        for future in futures:
+            stage, output, _ = future.result()
+            if output.strip():
+                print(f"--- [{stage.name}] ---")
+                sys.stdout.write(output)
+                if not output.endswith("\n"):
+                    sys.stdout.write("\n")
+
+
 def _run_cycle(args: argparse.Namespace, *, accounts: str, skip_dispatch: bool, py: str) -> None:
     # Only a run that spends or mutates is gated; a pure dry run reports as
     # usual (matching fleet_dispatch, whose dry run also proceeds with a note).
@@ -447,16 +485,18 @@ def _run_cycle(args: argparse.Namespace, *, accounts: str, skip_dispatch: bool, 
             return
 
     ctx = _Ctx(args=args, accounts=accounts, skip_dispatch=skip_dispatch, py=py)
+    concurrency = getattr(args, "concurrency", 1)
     for wave in build_waves():
         if len(wave) > 1:
             print(f"(wave: {', '.join(i.stage for i in wave)} — no dependency between them)")
+        wave_stages: list[Stage] = []
         for item in wave:
             resolver = RESOLVERS.get(item.stage)
             if resolver is None:
                 print(f"(no resolver for graph stage {item.stage!r} — skipping)")
                 continue
-            for stage in resolver(ctx):
-                _execute_stage(stage, execute=args.execute)
+            wave_stages.extend(resolver(ctx))
+        _execute_wave(wave_stages, execute=args.execute, concurrency=concurrency)
 
 
 def _loop_should_stop(
@@ -734,6 +774,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--max-backoff-min", type=float, default=30.0, help="--loop only: backoff ceiling"
+    )
+    parser.add_argument(
+        "--concurrency",
+        "-j",
+        type=int,
+        default=1,
+        help="max parallel tools to run concurrently within a single wave (default: %(default)s)",
     )
     args = parser.parse_args(argv)
 
