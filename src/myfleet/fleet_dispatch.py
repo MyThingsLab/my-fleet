@@ -43,6 +43,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -82,6 +83,129 @@ HALT_MARKER = RUNTIME_DIR / "HALT"
 # persist into the next one -- an operator who wants a permanently higher
 # ceiling should pass --max-daily-usd instead.
 DAILY_CAP_OVERRIDE = RUNTIME_DIR / "daily-cap-override.json"
+
+# Active worker registry blackboard: coordinates concurrent workers deterministically (my-fleet#70).
+ACTIVE_WORKERS_FILE = RUNTIME_DIR / "active_workers.json"
+_WORKER_REGISTRY_LOCK = threading.Lock()
+
+
+def _read_active_workers(path: Path | None = None) -> dict[str, dict[str, str]]:
+    target_path = path or ACTIVE_WORKERS_FILE
+    if not target_path.exists():
+        return {}
+    try:
+        data = json.loads(target_path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+    except (json.JSONDecodeError, OSError):
+        pass
+    return {}
+
+
+def _write_active_workers(data: dict[str, dict[str, str]], path: Path | None = None) -> None:
+    target_path = path or ACTIVE_WORKERS_FILE
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = target_path.with_suffix(".tmp")
+    temp_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    temp_path.replace(target_path)
+
+
+def _register_worker(
+    account_name: str,
+    candidate_id: str,
+    repo: str,
+    *,
+    started_at: str | None = None,
+    path: Path | None = None,
+) -> None:
+    target_path = path or ACTIVE_WORKERS_FILE
+    now_ts = started_at or datetime.now(UTC).isoformat()
+    with _WORKER_REGISTRY_LOCK:
+        workers = _read_active_workers(target_path)
+        workers[account_name] = {
+            "candidate": candidate_id,
+            "repo": repo,
+            "started_at": now_ts,
+        }
+        _write_active_workers(workers, target_path)
+
+
+def _deregister_worker(account_name: str, *, path: Path | None = None) -> None:
+    target_path = path or ACTIVE_WORKERS_FILE
+    with _WORKER_REGISTRY_LOCK:
+        workers = _read_active_workers(target_path)
+        if account_name in workers:
+            del workers[account_name]
+            _write_active_workers(workers, target_path)
+
+
+def _cleanup_stale_leases(
+    *,
+    max_age_s: float = 7200.0,
+    force_all: bool = False,
+    now: datetime | None = None,
+    path: Path | None = None,
+) -> int:
+    target_path = path or ACTIVE_WORKERS_FILE
+    with _WORKER_REGISTRY_LOCK:
+        workers = _read_active_workers(target_path)
+        if not workers:
+            return 0
+        if force_all:
+            removed = len(workers)
+            _write_active_workers({}, target_path)
+            return removed
+
+        current_time = now or datetime.now(UTC)
+        cleaned = {}
+        removed = 0
+        for name, info in workers.items():
+            started_str = info.get("started_at", "")
+            is_stale = False
+            try:
+                started_dt = datetime.fromisoformat(started_str)
+                if started_dt.tzinfo is None:
+                    started_dt = started_dt.replace(tzinfo=UTC)
+                if (current_time - started_dt).total_seconds() > max_age_s:
+                    is_stale = True
+            except (ValueError, TypeError):
+                is_stale = True
+
+            if is_stale:
+                removed += 1
+            else:
+                cleaned[name] = info
+
+        if removed > 0:
+            _write_active_workers(cleaned, target_path)
+        return removed
+
+
+def _active_fleet_context(current_account: str, *, path: Path | None = None) -> str:
+    target_path = path or ACTIVE_WORKERS_FILE
+    with _WORKER_REGISTRY_LOCK:
+        workers = _read_active_workers(target_path)
+    siblings = [
+        (acc, info)
+        for acc, info in workers.items()
+        if acc != current_account and isinstance(info, dict)
+    ]
+    if not siblings:
+        return ""
+    lines = [
+        "Active Fleet Context:",
+        "The following sibling tasks are currently in flight across the fleet:",
+    ]
+    for acc, info in siblings:
+        cand = info.get("candidate", "unknown")
+        repo = info.get("repo", "unknown")
+        started = info.get("started_at", "")
+        lines.append(f"- Worker '{acc}': {cand} (repo: {repo}, started: {started})")
+    lines.append(
+        "Be aware of related upstream/downstream changes in flight; avoid conflicting modifications."
+    )
+    return "\n".join(lines)
+
 
 def _utc_ts() -> str:
     return datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
@@ -183,7 +307,6 @@ def _preflight_distinct_accounts(accounts: list[Account]) -> list[str]:
     return problems
 
 
-
 # --- PR merge-readiness report ----------------------------------------------
 #
 # Observation only: nothing here changes a PR's state. "success" means my-coder
@@ -219,8 +342,21 @@ def _checks_state(org: str, repo: str, number: int) -> str:
     # PR in the fleet as broken. The distinction that matters is whether the *required*
     # checks ran, so ask gh for only those and judge nothing else.
     result = subprocess.run(
-        ["gh", "pr", "checks", str(number), "--repo", f"{org}/{repo}", "--required", "--json", "bucket", "--jq", ".[].bucket"],
-        capture_output=True, text=True,
+        [
+            "gh",
+            "pr",
+            "checks",
+            str(number),
+            "--repo",
+            f"{org}/{repo}",
+            "--required",
+            "--json",
+            "bucket",
+            "--jq",
+            ".[].bucket",
+        ],
+        capture_output=True,
+        text=True,
     )
     buckets = [b for b in result.stdout.split() if b]
     if not buckets:
@@ -243,10 +379,20 @@ def _critical_halt_issues(org: str) -> list[dict]:
     # "Filing bugs".
     result = subprocess.run(
         [
-            "gh", "search", "issues", "--owner", org, "--state", "open",
-            "--label", "critical", "--json", "repository,number,title,url",
+            "gh",
+            "search",
+            "issues",
+            "--owner",
+            org,
+            "--state",
+            "open",
+            "--label",
+            "critical",
+            "--json",
+            "repository,number,title,url",
         ],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if result.returncode != 0 or not result.stdout.strip():
         return []
@@ -403,10 +549,7 @@ def _last_attempt(ledger: Ledger, candidate_id: str) -> Attempt | None:
         1
         for e in entries
         if e.outcome in _COUNTED_OUTCOMES
-        and not (
-            e.outcome == "failed"
-            and _is_transient_failure(e.data.get("final_message", ""))
-        )
+        and not (e.outcome == "failed" and _is_transient_failure(e.data.get("final_message", "")))
     )
     return Attempt(
         candidate_id=candidate_id,
@@ -493,8 +636,19 @@ def _mycoder_branch(candidate: Candidate) -> str:
 def _open_pr_number(org: str, repo: str, branch: str) -> int | None:
     result = subprocess.run(
         [
-            "gh", "pr", "list", "--repo", f"{org}/{repo}", "--head", branch,
-            "--state", "open", "--json", "number", "--jq", ".[0].number // empty",
+            "gh",
+            "pr",
+            "list",
+            "--repo",
+            f"{org}/{repo}",
+            "--head",
+            branch,
+            "--state",
+            "open",
+            "--json",
+            "number",
+            "--jq",
+            ".[0].number // empty",
         ],
         capture_output=True,
         text=True,
@@ -538,139 +692,159 @@ def _dispatch_one(
         print("  [dry-run] not launched")
         return
 
-    ledger.record(
-        tool="fleet_dispatch",
-        kind="dispatch",
-        outcome="started",
-        detail=f"{account.name} -> {candidate.id} ({mode}) [{provider}]",
-        candidate=candidate.id,
-        account=account.name,
-        branch=branch,
-        attempt=attempt_number,
-    )
-
-    # my-coder owns the whole worker role now: its own Workspace worktree,
-    # branch naming/resume, prompt (searcher/researcher context, the blocker/
-    # critical-bug protocol), running the target repo's tests, and the single
-    # push + PR side effect. This just picks which candidate to run and
-    # translates the result into the outcome vocabulary _dispatch_decision
-    # already knows.
-    _fresh_base_ref(repo_path)  # best-effort fetch; see its docstring
-    TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
-    env = {
-        **os.environ,
-        "CLAUDE_CONFIG_DIR": str(account.config_dir),
-        "GEMINI_CONFIG_DIR": str(account.config_dir),
-    }
-    argv = [
-        "mycoder", "build",
-        "--repo", f"{org}/{repo}",
-        "--issue", number,
-        "--source", str(repo_path),
-        "--session-runner", provider,
-        "--max-budget-usd", str(max_budget_usd),
-        "--max-turns", str(max_turns),
-        "--session-timeout-s", str(session_timeout_s),
-        "--run-tests",
-        "--transcripts-dir", str(TRANSCRIPTS_DIR),
-        "--json",
-    ]
-    # A backstop above my-coder's own internal session timeout: git/test
-    # overhead around the session itself isn't bounded by --session-timeout-s,
-    # so this catches a genuinely stuck `mycoder build` process rather than
-    # blocking the thread forever. Routed to "deferred" below, same as any
-    # other transient infrastructure hiccup.
-    timed_out = False
+    _register_worker(account.name, candidate.id, repo)
     try:
-        proc = subprocess.run(
-            argv, env=env, capture_output=True, text=True, timeout=session_timeout_s + 300,
-        )
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        proc = subprocess.CompletedProcess(args=argv, returncode=1, stdout="", stderr="")
-
-    data: dict = {}
-    if proc.stdout.strip():
-        try:
-            data = json.loads(proc.stdout.strip().splitlines()[-1])
-        except (json.JSONDecodeError, IndexError):
-            data = {}
-
-    mycoder_outcome = data.get("outcome")
-    detail = data.get("detail", "")
-    blocker = data.get("blocker")
-    pr_number = data.get("pr")
-    tests_passed = data.get("tests_passed")
-    cost_usd = float(data.get("cost_usd", 0.0))
-    files_touched = data.get("files_touched", [])
-
-    # An explicit blocker signal and a wall-clock timeout both win over
-    # everything else -- distinct outcomes from a real failure. Then mycoder's
-    # own structured outcome, translated 1:1 except "failure" (its name) ->
-    # "failed" (fleet_dispatch's own ledger vocabulary, unchanged since before
-    # this swap) and a transient-message reclassification to "deferred" so a
-    # session/rate-limit blip never counts toward MAX_ATTEMPTS.
-    if timed_out:
-        outcome, msg = (
-            "deferred",
-            f"deferred (transient): mycoder exceeded {session_timeout_s + 300:.0f}s wall-clock timeout",
-        )
-    elif mycoder_outcome is None:
-        # mycoder itself never returned a parseable result -- an infrastructure
-        # problem, not a real assessment of the issue.
-        tail = proc.stderr.strip()[-300:]
-        if _is_transient_failure(tail):
-            outcome, msg = "deferred", f"deferred (transient): mycoder exited {proc.returncode}"
-        else:
-            outcome, msg = "failed", f"mycoder exited {proc.returncode}: {tail or 'no output'}"
-    elif mycoder_outcome == "blocked":
-        outcome, msg = "blocked", detail
-    elif mycoder_outcome == "failure":
-        outcome, msg = (
-            ("deferred", f"deferred (transient): {detail}")
-            if _is_transient_failure(detail)
-            else ("failed", detail)
-        )
-    elif mycoder_outcome == "success":
-        # A PR is open; ask CI whether it's actually mergeable by a human.
-        outcome, msg = _finalize_pr(
-            org, repo, pr_number, tests_passed=tests_passed, ready_timeout=ready_timeout
-        )
-    else:
-        # needs_review / no_changes / denied / skipped pass through unchanged.
-        outcome, msg = mycoder_outcome, detail
-
-    note = f" (mycoder: {detail[:160]!r})" if detail and outcome != "success" else ""
-    print(f"  [{account.name}] {mode}: {outcome} — {msg}{note}")
-    ledger.record(
-        tool="fleet_dispatch",
-        kind="dispatch",
-        outcome=outcome,
-        detail=f"{account.name} -> {candidate.id}: {msg}",
-        candidate=candidate.id,
-        account=account.name,
-        branch=branch,
-        attempt=attempt_number,
-        pr_number=pr_number,
-        blocker=blocker,
-        final_message=detail[:500],
-        files_touched=files_touched,
-    )
-    if mycoder_outcome is not None:
-        # Minimal usage record: _today_spend_usd only needs cost_usd. The
-        # richer token/denial breakdown the old inline session recorded isn't
-        # available from mycoder's --json output (it would need parsing the
-        # transcript file mycoder persists) -- a known, accepted gap, not an
-        # oversight.
         ledger.record(
             tool="fleet_dispatch",
-            kind="usage",
-            outcome="success",
-            detail=f"{account.name} -> {candidate.id}: ${cost_usd:.4f}",
+            kind="dispatch",
+            outcome="started",
+            detail=f"{account.name} -> {candidate.id} ({mode}) [{provider}]",
             candidate=candidate.id,
             account=account.name,
-            cost_usd=cost_usd,
+            branch=branch,
+            attempt=attempt_number,
         )
+
+        # my-coder owns the whole worker role now: its own Workspace worktree,
+        # branch naming/resume, prompt (searcher/researcher context, the blocker/
+        # critical-bug protocol), running the target repo's tests, and the single
+        # push + PR side effect. This just picks which candidate to run and
+        # translates the result into the outcome vocabulary _dispatch_decision
+        # already knows.
+        _fresh_base_ref(repo_path)  # best-effort fetch; see its docstring
+        TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
+        env = {
+            **os.environ,
+            "CLAUDE_CONFIG_DIR": str(account.config_dir),
+            "GEMINI_CONFIG_DIR": str(account.config_dir),
+        }
+        fleet_ctx = _active_fleet_context(account.name)
+        if fleet_ctx:
+            env["MYTHINGS_FLEET_CONTEXT"] = fleet_ctx
+        argv = [
+            "mycoder",
+            "build",
+            "--repo",
+            f"{org}/{repo}",
+            "--issue",
+            number,
+            "--source",
+            str(repo_path),
+            "--session-runner",
+            provider,
+            "--max-budget-usd",
+            str(max_budget_usd),
+            "--max-turns",
+            str(max_turns),
+            "--session-timeout-s",
+            str(session_timeout_s),
+            "--run-tests",
+            "--transcripts-dir",
+            str(TRANSCRIPTS_DIR),
+            "--json",
+        ]
+        # A backstop above my-coder's own internal session timeout: git/test
+        # overhead around the session itself isn't bounded by --session-timeout-s,
+        # so this catches a genuinely stuck `mycoder build` process rather than
+        # blocking the thread forever. Routed to "deferred" below, same as any
+        # other transient infrastructure hiccup.
+        timed_out = False
+        try:
+            proc = subprocess.run(
+                argv,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=session_timeout_s + 300,
+            )
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            proc = subprocess.CompletedProcess(args=argv, returncode=1, stdout="", stderr="")
+
+        data: dict = {}
+        if proc.stdout.strip():
+            try:
+                data = json.loads(proc.stdout.strip().splitlines()[-1])
+            except (json.JSONDecodeError, IndexError):
+                data = {}
+
+        mycoder_outcome = data.get("outcome")
+        detail = data.get("detail", "")
+        blocker = data.get("blocker")
+        pr_number = data.get("pr")
+        tests_passed = data.get("tests_passed")
+        cost_usd = float(data.get("cost_usd", 0.0))
+        files_touched = data.get("files_touched", [])
+
+        # An explicit blocker signal and a wall-clock timeout both win over
+        # everything else -- distinct outcomes from a real failure. Then mycoder's
+        # own structured outcome, translated 1:1 except "failure" (its name) ->
+        # "failed" (fleet_dispatch's own ledger vocabulary, unchanged since before
+        # this swap) and a transient-message reclassification to "deferred" so a
+        # session/rate-limit blip never counts toward MAX_ATTEMPTS.
+        if timed_out:
+            outcome, msg = (
+                "deferred",
+                f"deferred (transient): mycoder exceeded {session_timeout_s + 300:.0f}s wall-clock timeout",
+            )
+        elif mycoder_outcome is None:
+            # mycoder itself never returned a parseable result -- an infrastructure
+            # problem, not a real assessment of the issue.
+            tail = proc.stderr.strip()[-300:]
+            if _is_transient_failure(tail):
+                outcome, msg = "deferred", f"deferred (transient): mycoder exited {proc.returncode}"
+            else:
+                outcome, msg = "failed", f"mycoder exited {proc.returncode}: {tail or 'no output'}"
+        elif mycoder_outcome == "blocked":
+            outcome, msg = "blocked", detail
+        elif mycoder_outcome == "failure":
+            outcome, msg = (
+                ("deferred", f"deferred (transient): {detail}")
+                if _is_transient_failure(detail)
+                else ("failed", detail)
+            )
+        elif mycoder_outcome == "success":
+            # A PR is open; ask CI whether it's actually mergeable by a human.
+            outcome, msg = _finalize_pr(
+                org, repo, pr_number, tests_passed=tests_passed, ready_timeout=ready_timeout
+            )
+        else:
+            # needs_review / no_changes / denied / skipped pass through unchanged.
+            outcome, msg = mycoder_outcome, detail
+
+        note = f" (mycoder: {detail[:160]!r})" if detail and outcome != "success" else ""
+        print(f"  [{account.name}] {mode}: {outcome} — {msg}{note}")
+        ledger.record(
+            tool="fleet_dispatch",
+            kind="dispatch",
+            outcome=outcome,
+            detail=f"{account.name} -> {candidate.id}: {msg}",
+            candidate=candidate.id,
+            account=account.name,
+            branch=branch,
+            attempt=attempt_number,
+            pr_number=pr_number,
+            blocker=blocker,
+            final_message=detail[:500],
+            files_touched=files_touched,
+        )
+        if mycoder_outcome is not None:
+            # Minimal usage record: _today_spend_usd only needs cost_usd. The
+            # richer token/denial breakdown the old inline session recorded isn't
+            # available from mycoder's --json output (it would need parsing the
+            # transcript file mycoder persists) -- a known, accepted gap, not an
+            # oversight.
+            ledger.record(
+                tool="fleet_dispatch",
+                kind="usage",
+                outcome="success",
+                detail=f"{account.name} -> {candidate.id}: ${cost_usd:.4f}",
+                candidate=candidate.id,
+                account=account.name,
+                cost_usd=cost_usd,
+            )
+    finally:
+        _deregister_worker(account.name)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -698,8 +872,7 @@ def main(argv: list[str] | None = None) -> int:
     halt_group.add_argument(
         "--clear-halt",
         action="store_true",
-        help="remove the HALT marker and exit immediately, restoring normal "
-        "--execute operation.",
+        help="remove the HALT marker and exit immediately, restoring normal --execute operation.",
     )
     halt_group.add_argument(
         "--raise-daily-cap",
@@ -814,19 +987,20 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.clear_halt:
+        stale = _cleanup_stale_leases(force_all=True)
         if HALT_MARKER.exists():
             HALT_MARKER.unlink()
             print(f"HALT marker cleared: {HALT_MARKER}")
         else:
             print("no HALT marker was set")
+        if stale:
+            print(f"cleaned up {stale} stale worker lease(s)")
         return 0
 
     if args.raise_daily_cap is not None:
         DAILY_CAP_OVERRIDE.parent.mkdir(parents=True, exist_ok=True)
         today = datetime.now(UTC).strftime("%Y-%m-%d")
-        DAILY_CAP_OVERRIDE.write_text(
-            json.dumps({"day": today, "cap_usd": args.raise_daily_cap})
-        )
+        DAILY_CAP_OVERRIDE.write_text(json.dumps({"day": today, "cap_usd": args.raise_daily_cap}))
         print(
             f"today's effective daily cap raised to ${args.raise_daily_cap:.2f} "
             f"(--max-daily-usd default: ${args.max_daily_usd:.2f})"
@@ -926,9 +1100,7 @@ def main(argv: list[str] | None = None) -> int:
         # visible rather than trusting the flag alone -- a stale GH_TOKEN env
         # var or a `gh auth switch` since the last run could point somewhere
         # unexpected, silently.
-        proc = subprocess.run(
-            ["gh", "api", "user", "-q", ".login"], capture_output=True, text=True
-        )
+        proc = subprocess.run(["gh", "api", "user", "-q", ".login"], capture_output=True, text=True)
         if proc.returncode != 0:
             print(f"refusing to dispatch: `gh auth status` failed — {proc.stderr.strip()}")
             return 1
@@ -999,8 +1171,7 @@ def main(argv: list[str] | None = None) -> int:
     # being handled, and re-running it just burns an account to open a second,
     # duplicate PR for the same issue.
     in_flight = [
-        c for c in dispatchable
-        if _open_pr_number(args.org, c.repo, _mycoder_branch(c)) is not None
+        c for c in dispatchable if _open_pr_number(args.org, c.repo, _mycoder_branch(c)) is not None
     ]
     if in_flight:
         ids = {c.id for c in in_flight}
@@ -1055,7 +1226,9 @@ def main(argv: list[str] | None = None) -> int:
             continue
         plan.append((c, prior if decision == "resume" else None))
 
-    pairs = list(zip(accounts, plan, strict=False))  # deliberately truncates to the shorter of the two
+    pairs = list(
+        zip(accounts, plan, strict=False)
+    )  # deliberately truncates to the shorter of the two
 
     # Enforced before spend, not after: sum today's actual usage-ledger cost
     # plus the worst case for every session this run is about to launch, and
@@ -1080,9 +1253,8 @@ def main(argv: list[str] | None = None) -> int:
         # finally trips -- see fleet-dispatch#41. Once per day is deliberate:
         # --loop re-evaluates this every iteration, and a crossed threshold
         # stays crossed.
-        if (
-            projected >= args.spend_alert_fraction * effective_cap
-            and not _spend_alert_sent_today(dispatch_ledger)
+        if projected >= args.spend_alert_fraction * effective_cap and not _spend_alert_sent_today(
+            dispatch_ledger
         ):
             raise_to = round(effective_cap * 1.5, 2)
             sent = fleet_ask.alert_spend(spent=spent_today, cap=effective_cap, raise_to=raise_to)
@@ -1094,8 +1266,16 @@ def main(argv: list[str] | None = None) -> int:
                 f"({args.spend_alert_fraction:.0%} threshold)",
             )
 
+    if args.execute:
+        stale = _cleanup_stale_leases(max_age_s=args.session_timeout_s + 600)
+        if stale:
+            print(f"cleaned up {stale} stale worker lease(s) from previous runs")
+
     failures: list[tuple[Account, Candidate, BaseException]] = []
     if pairs:
+        if args.execute:
+            for account, (candidate, _) in pairs:
+                _register_worker(account.name, candidate.id, candidate.id.split("#")[0])
         # One worker thread per account: each `mycoder build` invocation gets
         # its own Workspace worktree (mythings.isolation.Workspace, inside
         # my-coder) under its own config dir, so nothing about running
