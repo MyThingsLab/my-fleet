@@ -385,7 +385,9 @@ def test_dispatch_decision_deferred_always_resumes() -> None:
     assert fd._dispatch_decision(deferred, blocker_open=False, max_attempts=3) == "resume"
 
 
-def test_main_resumes_or_skips_by_prior_attempt(tmp_path: Path, monkeypatch) -> None:
+def test_main_resumes_or_skips_by_prior_attempt(
+    tmp_path: Path, monkeypatch, telegram: list[tuple[str, dict]]
+) -> None:
     got: dict[str, object] = {}
 
     def fake_dispatch_one(
@@ -436,6 +438,11 @@ def test_main_resumes_or_skips_by_prior_attempt(tmp_path: Path, monkeypatch) -> 
     # r#3 hitting the cap is recorded as needs_human so it stays skipped.
     outcomes = [e.outcome for e in Ledger(tmp_path / "ledger.jsonl") if e.data.get("candidate") == "r#3"]
     assert "needs_human" in outcomes
+    # ...and a human is actually told, which is the point of needs_human. Pinned
+    # here rather than left to happen: unstubbed, this path shelled out to the
+    # real `mytelegrambot` and messaged the operator on every run (#47).
+    escalated = [kwargs["candidate"] for name, kwargs in telegram if name == "escalate_blocker"]
+    assert escalated == ["r#3"]
 
 
 # --- deny-reads shrink what a worker may read ------------------------------
