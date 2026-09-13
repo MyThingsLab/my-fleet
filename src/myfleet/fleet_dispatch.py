@@ -26,7 +26,7 @@ passed, draft when it did not. This module promotes nothing, never pushes to
 main, and never merges; the gate is the merge, and a human performs it.
 Defaults to --dry-run; pass --execute to actually spawn the headless sessions.
 
-Kill switch: `--abort` touches a HALT marker (.fleet-dispatch/HALT) and exits;
+Kill switch: `--abort` touches a HALT marker (.my-fleet/HALT) and exits;
 every subsequent --execute run refuses to launch anything until `--clear-halt`
 removes it. See README.md's "Kill switch" section for the one-line runbook.
 
@@ -62,22 +62,26 @@ from myfleet.workspace import ROOT_ENV, fleet_root
 # unless $MYTHINGS_WORKSPACE_ROOT says otherwise -- the climb lands in a scratch
 # dir when this module is imported from a Workspace worktree (#48).
 WORKSPACE_ROOT = fleet_root(__file__)
-DISPATCH_LEDGER = WORKSPACE_ROOT / ".fleet-dispatch" / "ledger.jsonl"
-TRANSCRIPTS_DIR = WORKSPACE_ROOT / ".fleet-dispatch" / "transcripts"
+# Runtime state for the dispatch loop. Named .my-fleet/ after this repo; it was
+# .fleet-dispatch/ back when the scripts lived in the workspace-root repo of
+# that name, which is now archived.
+RUNTIME_DIR = WORKSPACE_ROOT / ".my-fleet"
+DISPATCH_LEDGER = RUNTIME_DIR / "ledger.jsonl"
+TRANSCRIPTS_DIR = RUNTIME_DIR / "transcripts"
 # The kill switch: a marker file, not a signal or a flag a running process has
 # to poll mid-loop. `--execute` checks for it before launching anything and
 # refuses outright if it's there, so arming it (`--abort`) always beats a run
 # that starts after it -- no race between "halt" and "launch". It doesn't
 # reach into an already-running headless session (those are already bounded by
 # --max-budget-usd/--max-turns and end on their own); it stops the *next* one.
-HALT_MARKER = WORKSPACE_ROOT / ".fleet-dispatch" / "HALT"
+HALT_MARKER = RUNTIME_DIR / "HALT"
 
 # The spend alert's "Raise cap" button (mytelegrambot's spend_command) shells
 # back into `--raise-daily-cap AMOUNT`; this is where that lands. Day-scoped
 # like the spend it overrides, so a raise from a busy day doesn't silently
 # persist into the next one -- an operator who wants a permanently higher
 # ceiling should pass --max-daily-usd instead.
-DAILY_CAP_OVERRIDE = WORKSPACE_ROOT / ".fleet-dispatch" / "daily-cap-override.json"
+DAILY_CAP_OVERRIDE = RUNTIME_DIR / "daily-cap-override.json"
 
 def _utc_ts() -> str:
     return datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
