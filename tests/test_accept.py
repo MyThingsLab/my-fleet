@@ -14,6 +14,7 @@ from myfleet.accept import (
     carve_out_for,
     closing_issue,
     main_is_protected,
+    new_dependencies,
 )
 
 
@@ -310,3 +311,155 @@ class TestPerRepoCarveOuts:
         # runner and my-fleet's study scripts are ordinary code.
         assert carve_out_for(["src/mycoder/session.py"], "my-coder") is None
         assert carve_out_for(["src/myfleet/study_all.py"], "my-fleet") is None
+
+
+class TestNewDependency:
+    """A dependency added by a PR is a decision, and decisions are a human's."""
+
+    @staticmethod
+    def _gh_returning(contents: dict[tuple[str, str], str]):
+        # Keyed on (path, ref) -> raw pyproject text; a missing key is an
+        # unreadable file.
+        def fake(argv: list[str]) -> tuple[int, str, str]:
+            assert argv[0] == "api"
+            path, _, ref = argv[1].partition("?ref=")
+            path = path.split("/contents/", 1)[1]
+            if (path, ref) not in contents:
+                return 1, "", "404"
+            return 0, contents[(path, ref)], ""
+
+        return fake
+
+    def _pyproject(self, *deps: str, optional: dict[str, list[str]] | None = None) -> str:
+        lines = ["[project]", f"dependencies = {json.dumps(list(deps))}"]
+        if optional:
+            lines.append("[project.optional-dependencies]")
+            for group, specs in optional.items():
+                lines.append(f"{group} = {json.dumps(specs)}")
+        return "\n".join(lines) + "\n"
+
+    def _added(self, monkeypatch: pytest.MonkeyPatch, before: str, after: str):
+        monkeypatch.setattr(
+            "myfleet.accept._gh",
+            self._gh_returning(
+                {("pyproject.toml", "base"): before, ("pyproject.toml", "head"): after}
+            ),
+        )
+        return new_dependencies("my-fleet", ["pyproject.toml"], "base", "head")
+
+    def test_an_added_dependency_is_reported(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        added = self._added(
+            monkeypatch,
+            self._pyproject("my-things-core"),
+            self._pyproject("my-things-core", "requests>=2"),
+        )
+        assert added == frozenset({"requests"})
+
+    def test_a_version_bump_is_not_a_new_dependency(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A pin bump is a kind:chore the gate is happy to clear; only a new name
+        # in the tree is a decision.
+        added = self._added(
+            monkeypatch,
+            self._pyproject("my-things-core @ git+https://x/my-things-core@v1.1.0"),
+            self._pyproject("my-things-core @ git+https://x/my-things-core@v1.2.0"),
+        )
+        assert added == frozenset()
+
+    def test_an_optional_dependency_group_counts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A dev extra still lands in somebody's environment.
+        added = self._added(
+            monkeypatch,
+            self._pyproject("x", optional={"dev": ["pytest>=8"]}),
+            self._pyproject("x", optional={"dev": ["pytest>=8", "mypy"]}),
+        )
+        assert added == frozenset({"mypy"})
+
+    def test_a_removed_dependency_is_not_an_addition(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        added = self._added(monkeypatch, self._pyproject("x", "y"), self._pyproject("x"))
+        assert added == frozenset()
+
+    def test_an_unreadable_manifest_is_none_not_empty(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The distinction that matters: an empty set would make every dependency
+        # look pre-existing and quietly clear the check.
+        monkeypatch.setattr("myfleet.accept._gh", self._gh_returning({}))
+        assert new_dependencies("my-fleet", ["pyproject.toml"], "base", "head") is None
+
+    def test_malformed_toml_is_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        added = self._added(monkeypatch, self._pyproject("x"), "[project\nbroken")
+        assert added is None
+
+    def test_a_pr_adding_a_dependency_needs_a_human(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pr = {
+            "isDraft": False,
+            "body": "Closes #5",
+            "state": "OPEN",
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN",
+            "baseRefOid": "base",
+            "headRefOid": "head",
+        }
+        contents = {
+            ("pyproject.toml", "base"): self._pyproject("my-things-core"),
+            ("pyproject.toml", "head"): self._pyproject("my-things-core", "requests"),
+        }
+
+        def fake(argv: list[str]) -> tuple[int, str, str]:
+            if argv[0] == "api" and "/contents/" in argv[1]:
+                return self._gh_returning(contents)(argv)
+            if argv[0] == "api":
+                return 0, "", ""  # branch protection
+            if argv[0] == "pr" and "files" in argv:
+                return (
+                    0,
+                    json.dumps(
+                        {"files": [{"path": "pyproject.toml", "additions": 1, "deletions": 0}]}
+                    ),
+                    "",
+                )
+            if argv[0] == "pr":
+                return 0, json.dumps(pr), ""
+            if argv[0] == "issue":
+                return 0, json.dumps({"labels": [{"name": "size:S"}], "state": "OPEN"}), ""
+            raise AssertionError(f"unexpected gh call: {argv}")
+
+        monkeypatch.setattr("myfleet.accept._gh", fake)
+        monkeypatch.setattr("myfleet.accept._checks_state", lambda *a: "pass")
+
+        found = assess("my-fleet", 1)
+
+        # Every other check passes; the dependency alone escalates it.
+        assert found.verdict is Verdict.NEEDS_HUMAN
+        assert "no_new_dependency: adds requests" in found.reason
+
+    def test_a_pr_touching_no_manifest_passes_the_check(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "myfleet.accept._gh",
+            TestAssess._gh_returning(
+                pr={
+                    "isDraft": False,
+                    "body": "Closes #5",
+                    "state": "OPEN",
+                    "mergeable": "MERGEABLE",
+                    "mergeStateStatus": "CLEAN",
+                },
+                files=[{"path": "src/myfleet/study_all.py", "additions": 10, "deletions": 2}],
+                labels=["size:S"],
+                protected=True,
+            ),
+        )
+        monkeypatch.setattr("myfleet.accept._checks_state", lambda *a: "pass")
+
+        found = assess("my-fleet", 1)
+
+        # No manifest in the diff means no gh call to read one, so a PR that
+        # never touches dependencies is not made unevaluable by this check.
+        assert found.verdict is Verdict.ACCEPTED
+        assert [c.passed for c in found.checks if c.name == "no_new_dependency"] == [True]
