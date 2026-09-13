@@ -173,20 +173,19 @@ pip install -e ".[dev]"
 
 ## Deploy: the supervised loop (the Pi)
 
-Two timers drive `fleet_cycle.py` on two different cadences (#28), so that
-the ~50-repo `mytester`/`mychangelogger` fan-out (`BOOKKEEPING_STAGES`) never
-rides along on a tick that's mostly a no-op:
-
-- `systemd/fleet-cycle.{service,timer}` — the frequent **build tick**
-  (`myplanner` → `fleet_dispatch`), every 6 hours, via `run_fleet_cycle.sh
-  --skip-bookkeeping`.
-- `systemd/fleet-bookkeeping.{service,timer}` — the daily **bookkeeping
-  tick** (`mytester`, `mychangelogger`, `mydocs`, `mydashboard`,
-  `myprojector`, `myreporter`, `mypipeline sync`, `mytelegrambot`), via
-  `fleet_cycle.py --execute --skip-dispatch --brief-count 0 --engine noop`
-  directly — presentation/provenance, so it needs no account and spawns no
-  billed Engine calls or worker sessions. Switch `--engine` to `claude-cli`
-  once a run has confirmed the noop path end to end.
+- `systemd/fleet-cycle.{service,timer}` — **the one tick that actually runs**,
+  every 6 hours: the full cycle under the GitHub App with `--ask-human`.
+  Because it does not pass `--skip-bookkeeping`, it records *both* the `build`
+  and `bookkeeping` heartbeats.
+- `systemd/fleet-bookkeeping.{service,timer}` — the daily **bookkeeping tick**
+  (`mytester`, `mychangelogger`, `mydocs`, `mydashboard`, `myprojector`,
+  `myreporter`, `mypipeline sync`, `mytelegrambot`), via `fleet_cycle.py
+  --execute --skip-dispatch --brief-count 0 --engine noop`. **Not installed.**
+  The intent (#28) was to keep the ~50-repo fan-out off a build tick that is
+  mostly a no-op; as deployed, the fan-out rides along four times a day
+  instead. Splitting it back out means adding `--skip-bookkeeping` to
+  `fleet-cycle.service` *in the same change* — install this timer beside the
+  current unit and the whole fan-out runs twice.
 - `systemd/fleet-heartbeat.{service,timer}` — hourly dead-man's-switch:
   `myfleet.heartbeat` alerts (and exits nonzero) if either tick's last
   recorded heartbeat is older than its own cadence allows, closing the gap a
@@ -194,6 +193,15 @@ rides along on a tick that's mostly a no-op:
   the `ExecStart` itself runs and fails — a masked or never-installed timer
   produces nothing to catch). See `myfleet.heartbeat`'s module docstring for
   the incident that motivated it.
+
+  Both halves of it were broken until 2026-09-13, and the pairing is the
+  lesson: it read `.fleet-dispatch/ledger.jsonl` (renamed to `.my-fleet/` in
+  #62) so it saw "never recorded" on every run, *and* its timer was never
+  installed, so nobody received the false alarm. Fixing either alone is worse
+  than fixing neither — an armed switch nobody hears, or an hourly page that
+  is always wrong. The reader/writer path now comes from
+  `myfleet.workspace.ledger_path`, pinned by a test that compares the two ends
+  to each other rather than to a literal.
 
 `systemd/fleet-usage.{service,timer}`, `mytelegrambot.service(.d/testers.conf)`
 and `telegram-alert@.service` round out the deployment: usage polling and the
@@ -212,20 +220,25 @@ back here in the same session** — these files are documentation of a manual
 `sudo cp` + `daemon-reload`, not something `fleet-cycle.py` deploys itself.
 
 ```bash
-sudo cp systemd/fleet-cycle.{service,timer} systemd/fleet-bookkeeping.{service,timer} \
-        systemd/fleet-heartbeat.{service,timer} /etc/systemd/system/
+sudo cp systemd/fleet-cycle.{service,timer} systemd/fleet-heartbeat.{service,timer} \
+        /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now fleet-cycle.timer fleet-bookkeeping.timer fleet-heartbeat.timer
+sudo systemctl enable --now fleet-cycle.timer fleet-heartbeat.timer
 ```
+
+`fleet-bookkeeping` is deliberately absent from both lines — see above; it
+cannot be installed without adding `--skip-bookkeeping` to `fleet-cycle`.
 
 To confirm a timer actually fires rather than trusting `enable --now`, run its
 service once by hand and check the journal, then watch for its heartbeat:
 
 ```bash
 sudo systemctl start fleet-cycle.service && journalctl -u fleet-cycle.service -n 50
-sudo systemctl start fleet-bookkeeping.service && journalctl -u fleet-bookkeeping.service -n 50
-python3 -m myfleet.heartbeat  # "heartbeats fresh: bookkeeping, build" once both have run
+python3 -m myfleet.heartbeat  # "heartbeats fresh: bookkeeping, build" after one full tick
 ```
+
+Run `myfleet.heartbeat` by hand once after installing it. A switch that has
+never been observed saying "fresh" is indistinguishable from one that cannot.
 
 ## License
 

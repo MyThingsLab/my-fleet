@@ -29,6 +29,18 @@ from pathlib import Path
 
 ROOT_ENV = "MYTHINGS_WORKSPACE_ROOT"
 
+# Runtime state for the fleet loop. Named after this repo; it was
+# `.fleet-dispatch/` back when the scripts lived in the workspace-root repo of
+# that name, now archived. It lives here rather than in fleet_dispatch.py
+# because the writer is not the only module that needs it and the reader must
+# not import the writer: heartbeat.py deliberately avoids fleet_dispatch (which
+# drags in myorchestrator), so it spelled the path out a second time -- and when
+# #62 renamed the directory, only one of the two copies moved. The dead-man's
+# switch then read a file nobody writes and reported both ticks as "never
+# recorded" on every run, which is precisely the false-alive state it exists to
+# detect.
+RUNTIME_DIR_NAME = ".my-fleet"
+
 # A fleet root holds one checkout per tool. These two are the ones every
 # derivation above ultimately reaches for -- the SDK and this repo -- so their
 # presence is what distinguishes a real root from a plausible-looking path.
@@ -48,3 +60,12 @@ def fleet_root(module_file: str) -> Path:
     if override:
         return Path(override).resolve()
     return Path(module_file).resolve().parents[3]
+
+
+def runtime_dir(root: Path) -> Path:
+    return root / RUNTIME_DIR_NAME
+
+
+def ledger_path(root: Path) -> Path:
+    """The fleet's shared runtime ledger -- what fleet_cycle writes heartbeats to."""
+    return runtime_dir(root) / "ledger.jsonl"

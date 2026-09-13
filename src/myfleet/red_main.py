@@ -30,14 +30,14 @@ from mythings.labels import escalate
 from mythings.ledger import Ledger
 from mythings.policy import Action, Decision
 
-from myfleet.workspace import fleet_root
+from myfleet.workspace import fleet_root, ledger_path
 
 ORG = "MyThingsLab"
 TOOL = "red_main"
 KIND = "watch"
 
 WORKSPACE_ROOT = fleet_root(__file__)
-DEFAULT_LEDGER = WORKSPACE_ROOT / ".my-fleet" / "ledger.jsonl"
+DEFAULT_LEDGER = ledger_path(WORKSPACE_ROOT)
 
 # Marker label, same trick as mytester's `test-driven`: it makes "is there
 # already an open issue for this" a label query rather than title matching,

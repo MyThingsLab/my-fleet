@@ -57,17 +57,14 @@ from mythings.github import app_installation_org, github_app_token
 from mythings.ledger import Ledger
 
 import myfleet.fleet_ask as fleet_ask
-from myfleet.workspace import ROOT_ENV, fleet_root
+from myfleet.workspace import ROOT_ENV, fleet_root, ledger_path, runtime_dir
 
 # Climbs myfleet/<file>.py -> src -> my-fleet -> MyThingsLab/ (the fleet root),
 # unless $MYTHINGS_WORKSPACE_ROOT says otherwise -- the climb lands in a scratch
 # dir when this module is imported from a Workspace worktree (#48).
 WORKSPACE_ROOT = fleet_root(__file__)
-# Runtime state for the dispatch loop. Named .my-fleet/ after this repo; it was
-# .fleet-dispatch/ back when the scripts lived in the workspace-root repo of
-# that name, which is now archived.
-RUNTIME_DIR = WORKSPACE_ROOT / ".my-fleet"
-DISPATCH_LEDGER = RUNTIME_DIR / "ledger.jsonl"
+RUNTIME_DIR = runtime_dir(WORKSPACE_ROOT)
+DISPATCH_LEDGER = ledger_path(WORKSPACE_ROOT)
 TRANSCRIPTS_DIR = RUNTIME_DIR / "transcripts"
 # The kill switch: a marker file, not a signal or a flag a running process has
 # to poll mid-loop. `--execute` checks for it before launching anything and
