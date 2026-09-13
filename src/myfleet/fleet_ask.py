@@ -21,8 +21,12 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-# Climbs myfleet/<file>.py -> src -> my-fleet -> MyThingsLab/ (the fleet root).
-WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
+from myfleet.workspace import fleet_root
+
+# Climbs myfleet/<file>.py -> src -> my-fleet -> MyThingsLab/ (the fleet root),
+# unless $MYTHINGS_WORKSPACE_ROOT says otherwise -- the climb lands in a scratch
+# dir when this module is imported from a Workspace worktree (#48).
+WORKSPACE_ROOT = fleet_root(__file__)
 
 # `mytelegrambot run` (the daemon) resolves its ledger relative to its own
 # WorkingDirectory, which the systemd unit sets to the bot's repo -- so this is

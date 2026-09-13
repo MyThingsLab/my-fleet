@@ -63,11 +63,14 @@ import myfleet.fleet_ask as fleet_ask
 import myfleet.preflight as preflight
 from myfleet.cycle_driver import Stage, import_or_die, run_command
 from myfleet.fleet_dispatch import DISPATCH_LEDGER, HALT_MARKER, _critical_halt_issues
+from myfleet.workspace import fleet_root
 
 build_waves = import_or_die("mypipeline.plan", "build_waves", "my-pipeline")
 
-# Climbs myfleet/<file>.py -> src -> my-fleet -> MyThingsLab/ (the fleet root).
-WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
+# Climbs myfleet/<file>.py -> src -> my-fleet -> MyThingsLab/ (the fleet root),
+# unless $MYTHINGS_WORKSPACE_ROOT says otherwise -- the climb lands in a scratch
+# dir when this module is imported from a Workspace worktree (#48).
+WORKSPACE_ROOT = fleet_root(__file__)
 ORG = "MyThingsLab"
 TRACKING_REPO = f"{ORG}/my-things-core"
 TRACKING_ISSUE = "1"
