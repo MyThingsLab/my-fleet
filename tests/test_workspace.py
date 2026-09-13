@@ -5,19 +5,20 @@ import pytest
 from myfleet import workspace
 
 
-def test_the_climb_lands_in_the_scratch_dir_from_a_worktree(
+def test_unresolvable_worktree_raises_runtime_error(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    # The bug, stated as arithmetic. A Workspace checkout lives at <prefix>/tree,
-    # so climbing three parents out of <prefix>/tree/src/myfleet/<mod>.py reaches
-    # <prefix> -- a scratch dir under /tmp, not the fleet root.
+    # A Workspace checkout lives at <prefix>/tree. Without $MYTHINGS_WORKSPACE_ROOT,
+    # climbing out of <prefix>/tree/src/myfleet/<mod>.py fails to find a valid fleet root
+    # and raises RuntimeError rather than returning an invalid /tmp scratch path.
     monkeypatch.delenv(workspace.ROOT_ENV, raising=False)
     prefix = tmp_path / "mythings-ws-abc123"
     module = prefix / "tree" / "src" / "myfleet" / "fleet_ask.py"
     module.parent.mkdir(parents=True)
     module.touch()
 
-    assert workspace.fleet_root(str(module)) == prefix
+    with pytest.raises(RuntimeError, match="Cannot resolve MyThingsLab fleet root"):
+        workspace.fleet_root(str(module))
 
 
 def test_an_explicit_root_wins_over_the_climb(
@@ -39,6 +40,7 @@ def test_a_blank_override_is_not_an_override(
 ) -> None:
     # An unset var and one set to "" reach this differently but mean the same
     # thing; `Path("")` is `.`, which would silently root the fleet at the cwd.
+    (tmp_path / "root" / "my-things-core").mkdir(parents=True)
     module = tmp_path / "root" / "my-fleet" / "src" / "myfleet" / "fleet_ask.py"
     module.parent.mkdir(parents=True)
     module.touch()
