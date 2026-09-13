@@ -43,6 +43,7 @@ class AccountUsage:
     # that case so the account still sorts into "over" (unusable this cycle)
     # without a caller needing to check this field separately.
     error: str = ""
+    provider: str = "claude"
 
     @property
     def over(self) -> bool:
@@ -85,33 +86,86 @@ def _run_usage_probe(config_dir: str, timeout: float = 30.0) -> str:
     return result
 
 
-def check_account(config_dir: str) -> AccountUsage:
-    config_dir = os.path.expanduser(config_dir)
-    text = _run_usage_probe(config_dir)
-    session = _SESSION_RE.search(text)
-    week = _WEEK_RE.search(text)
-    if not session:
-        raise UsageCheckError(f"could not find session usage in reply for {config_dir}: {text!r}")
-    return AccountUsage(
-        config_dir=config_dir,
-        session_pct=int(session.group(1)),
-        session_resets=(session.group(2) or "").strip(),
-        week_pct=int(week.group(1)) if week else -1,
-        week_resets=(week.group(2) or "").strip() if week else "",
-    )
+class ClaudeUsageProvider:
+    def check_account(self, config_dir: str, timeout: float = 30.0) -> AccountUsage:
+        config_dir = os.path.expanduser(config_dir)
+        text = _run_usage_probe(config_dir, timeout=timeout)
+        session = _SESSION_RE.search(text)
+        week = _WEEK_RE.search(text)
+        if not session:
+            raise UsageCheckError(
+                f"could not find session usage in reply for {config_dir}: {text!r}"
+            )
+        return AccountUsage(
+            config_dir=config_dir,
+            session_pct=int(session.group(1)),
+            session_resets=(session.group(2) or "").strip(),
+            week_pct=int(week.group(1)) if week else -1,
+            week_resets=(week.group(2) or "").strip() if week else "",
+            provider="claude",
+        )
 
 
-def check_all(config_dirs: list[str]) -> list[AccountUsage]:
-    return [check_account(d) for d in config_dirs]
+class GeminiUsageProvider:
+    def check_account(self, config_dir: str, timeout: float = 30.0) -> AccountUsage:
+        config_dir = os.path.expanduser(config_dir)
+        if not os.path.isdir(config_dir):
+            raise UsageCheckError(f"config dir does not exist: {config_dir}")
+        bin_name = os.environ.get("GEMINI_CLI_BIN", "agy")
+        env = os.environ.copy()
+        env["GEMINI_CONFIG_DIR"] = config_dir
+        try:
+            proc = subprocess.run(
+                [bin_name, "--version"],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+            if proc.returncode != 0:
+                reason = (
+                    proc.stderr.strip() or proc.stdout.strip() or f"exit {proc.returncode}"
+                )[:200]
+                raise UsageCheckError(f"{bin_name} --version failed for {config_dir}: {reason}")
+        except FileNotFoundError as exc:
+            raise UsageCheckError(f"CLI binary not found: {bin_name}") from exc
+
+        return AccountUsage(
+            config_dir=config_dir,
+            session_pct=0,
+            session_resets="",
+            week_pct=-1,
+            week_resets="",
+            provider="gemini",
+        )
+
+
+PROVIDERS = {
+    "claude": ClaudeUsageProvider(),
+    "gemini": GeminiUsageProvider(),
+}
+
+
+def check_account(
+    config_dir: str, timeout: float = 30.0, provider: str = "claude"
+) -> AccountUsage:
+    p = PROVIDERS.get(provider)
+    if not p:
+        raise UsageCheckError(f"unknown provider: {provider}")
+    return p.check_account(config_dir, timeout=timeout)
+
+
+def check_all(config_dirs: list[str], provider: str = "claude") -> list[AccountUsage]:
+    return [check_account(d, provider=provider) for d in config_dirs]
 
 
 def select_accounts(
-    config_dirs: list[str], max_session_pct: int = 90
+    config_dirs: list[str], max_session_pct: int = 90, provider: str = "claude"
 ) -> tuple[list[AccountUsage], list[AccountUsage]]:
     """Split accounts into (usable, over-threshold), preserving input order.
 
     A single account's probe failing (network blip, stale auth, a hung
-    `claude -p "/usage"` call) must not take out the whole batch -- callers
+    probe call) must not take out the whole batch -- callers
     like run_fleet_cycle.sh depend on this function degrading gracefully
     (excluding just the unreachable account) rather than raising, the same
     way fleet_dispatch.py's own per-account dispatch loop never lets one
@@ -120,7 +174,7 @@ def select_accounts(
     usable, over = [], []
     for config_dir in config_dirs:
         try:
-            usage = check_account(config_dir)
+            usage = check_account(config_dir, provider=provider)
         except UsageCheckError as exc:
             usage = AccountUsage(
                 config_dir=os.path.expanduser(config_dir),
@@ -129,6 +183,7 @@ def select_accounts(
                 week_pct=-1,
                 week_resets="",
                 error=str(exc),
+                provider=provider,
             )
         (over if usage.session_pct >= max_session_pct else usable).append(usage)
     return usable, over
@@ -136,9 +191,17 @@ def select_accounts(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Check Claude Code subscription session usage per account and pick usable ones."
+        description="Check AI subscription session usage per account and pick usable ones."
     )
-    parser.add_argument("--accounts", required=True, help="comma-separated CLAUDE_CONFIG_DIR paths")
+    parser.add_argument(
+        "--accounts", required=True, help="comma-separated config directory paths"
+    )
+    parser.add_argument(
+        "--provider",
+        choices=("claude", "gemini"),
+        default="claude",
+        help="usage provider (default: %(default)s)",
+    )
     parser.add_argument("--max-session-pct", type=int, default=90)
     parser.add_argument(
         "--quiet", action="store_true", help="print only the usable config-dir list"
@@ -146,7 +209,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     config_dirs = [d.strip() for d in args.accounts.split(",") if d.strip()]
-    usable, over = select_accounts(config_dirs, args.max_session_pct)
+    usable, over = select_accounts(
+        config_dirs, max_session_pct=args.max_session_pct, provider=args.provider
+    )
 
     # Diagnostics go to stderr, deliberately: stdout carries exactly one line
     # (the usable CSV, possibly empty) for callers like run_fleet_cycle.sh that
@@ -161,7 +226,7 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             flag = "OVER" if u.session_pct >= args.max_session_pct else "ok"
             print(
-                f"[{flag}] {u.config_dir}: session {u.session_pct}% (resets {u.session_resets}), "
+                f"[{flag}] {u.config_dir} ({u.provider}): session {u.session_pct}% (resets {u.session_resets}), "
                 f"week {u.week_pct}% (resets {u.week_resets})",
                 file=sys.stderr,
             )

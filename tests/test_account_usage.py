@@ -126,3 +126,74 @@ def test_main_stdout_is_empty_when_every_account_is_unusable(
     assert rc == 1
     assert captured.out == "\n"
     assert "[ERROR]" in captured.err
+
+
+def test_gemini_provider_healthy_account(tmp_path: Path, monkeypatch) -> None:
+    gemini_dir = tmp_path / "gemini-acct"
+    gemini_dir.mkdir()
+
+    def fake_run(cmd, **kwargs):
+        assert kwargs["env"]["GEMINI_CONFIG_DIR"] == str(gemini_dir)
+        return subprocess.CompletedProcess(cmd, 0, stdout="1.2.2\n", stderr="")
+
+    monkeypatch.setattr(au.subprocess, "run", fake_run)
+    usage = au.check_account(str(gemini_dir), provider="gemini")
+    assert usage.provider == "gemini"
+    assert usage.session_pct == 0
+    assert not usage.over
+    assert usage.error == ""
+
+
+def test_gemini_provider_missing_dir(tmp_path: Path) -> None:
+    missing = tmp_path / "nonexistent"
+    with pytest.raises(au.UsageCheckError, match="does not exist"):
+        au.check_account(str(missing), provider="gemini")
+
+
+def test_gemini_provider_cli_failure(tmp_path: Path, monkeypatch) -> None:
+    gemini_dir = tmp_path / "gemini-fail"
+    gemini_dir.mkdir()
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="auth expired")
+
+    monkeypatch.setattr(au.subprocess, "run", fake_run)
+    with pytest.raises(au.UsageCheckError, match="auth expired"):
+        au.check_account(str(gemini_dir), provider="gemini")
+
+
+def test_select_accounts_with_gemini_provider(tmp_path: Path, monkeypatch) -> None:
+    good = tmp_path / "good"
+    good.mkdir()
+    bad = tmp_path / "bad"
+    bad.mkdir()
+
+    def fake_run(cmd, **kwargs):
+        if kwargs["env"]["GEMINI_CONFIG_DIR"] == str(bad):
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="fail")
+        return subprocess.CompletedProcess(cmd, 0, stdout="1.0.0\n", stderr="")
+
+    monkeypatch.setattr(au.subprocess, "run", fake_run)
+    usable, over = au.select_accounts([str(good), str(bad)], provider="gemini")
+    assert [u.config_dir for u in usable] == [str(good)]
+    assert [u.config_dir for u in over] == [str(bad)]
+    assert usable[0].provider == "gemini"
+    assert over[0].provider == "gemini"
+
+
+def test_main_with_gemini_provider(
+    tmp_path: Path, monkeypatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    good = tmp_path / "good"
+    good.mkdir()
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, stdout="1.0.0\n", stderr="")
+
+    monkeypatch.setattr(au.subprocess, "run", fake_run)
+    rc = au.main(["--accounts", str(good), "--provider", "gemini"])
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert captured.out == f"{good}\n"
+    assert "[ok]" in captured.err
+    assert "(gemini)" in captured.err

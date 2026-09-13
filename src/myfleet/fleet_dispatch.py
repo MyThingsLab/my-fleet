@@ -26,7 +26,7 @@ passed, draft when it did not. This module promotes nothing, never pushes to
 main, and never merges; the gate is the merge, and a human performs it.
 Defaults to --dry-run; pass --execute to actually spawn the headless sessions.
 
-Kill switch: `--abort` touches a HALT marker (.fleet-dispatch/HALT) and exits;
+Kill switch: `--abort` touches a HALT marker (.my-fleet/HALT) and exits;
 every subsequent --execute run refuses to launch anything until `--clear-halt`
 removes it. See README.md's "Kill switch" section for the one-line runbook.
 
@@ -62,22 +62,26 @@ from myfleet.workspace import ROOT_ENV, fleet_root
 # unless $MYTHINGS_WORKSPACE_ROOT says otherwise -- the climb lands in a scratch
 # dir when this module is imported from a Workspace worktree (#48).
 WORKSPACE_ROOT = fleet_root(__file__)
-DISPATCH_LEDGER = WORKSPACE_ROOT / ".fleet-dispatch" / "ledger.jsonl"
-TRANSCRIPTS_DIR = WORKSPACE_ROOT / ".fleet-dispatch" / "transcripts"
+# Runtime state for the dispatch loop. Named .my-fleet/ after this repo; it was
+# .fleet-dispatch/ back when the scripts lived in the workspace-root repo of
+# that name, which is now archived.
+RUNTIME_DIR = WORKSPACE_ROOT / ".my-fleet"
+DISPATCH_LEDGER = RUNTIME_DIR / "ledger.jsonl"
+TRANSCRIPTS_DIR = RUNTIME_DIR / "transcripts"
 # The kill switch: a marker file, not a signal or a flag a running process has
 # to poll mid-loop. `--execute` checks for it before launching anything and
 # refuses outright if it's there, so arming it (`--abort`) always beats a run
 # that starts after it -- no race between "halt" and "launch". It doesn't
 # reach into an already-running headless session (those are already bounded by
 # --max-budget-usd/--max-turns and end on their own); it stops the *next* one.
-HALT_MARKER = WORKSPACE_ROOT / ".fleet-dispatch" / "HALT"
+HALT_MARKER = RUNTIME_DIR / "HALT"
 
 # The spend alert's "Raise cap" button (mytelegrambot's spend_command) shells
 # back into `--raise-daily-cap AMOUNT`; this is where that lands. Day-scoped
 # like the spend it overrides, so a raise from a busy day doesn't silently
 # persist into the next one -- an operator who wants a permanently higher
 # ceiling should pass --max-daily-usd instead.
-DAILY_CAP_OVERRIDE = WORKSPACE_ROOT / ".fleet-dispatch" / "daily-cap-override.json"
+DAILY_CAP_OVERRIDE = RUNTIME_DIR / "daily-cap-override.json"
 
 def _utc_ts() -> str:
     return datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
@@ -511,6 +515,7 @@ def _dispatch_one(
     prior: Attempt | None = None,
     ready_timeout: float = 0.0,
     session_timeout_s: float = 1800.0,
+    provider: str = "claude",
 ) -> None:
     repo, number = candidate.id.split("#")
     repo_path = WORKSPACE_ROOT / repo
@@ -522,7 +527,7 @@ def _dispatch_one(
     # separate threads, individual print()s from different accounts could
     # otherwise interleave mid-block and produce unreadable output.
     print(
-        f"\n=== {account.name} -> {candidate.id} ({repo}) [{mode}] ===\n"
+        f"\n=== {account.name} -> {candidate.id} ({repo}) [{mode}] [{provider}] ===\n"
         f"  branch: {branch}\n"
         f"  config: {account.config_dir}\n"
         f"  budget cap: ${max_budget_usd}, turn cap: {max_turns}, "
@@ -537,7 +542,7 @@ def _dispatch_one(
         tool="fleet_dispatch",
         kind="dispatch",
         outcome="started",
-        detail=f"{account.name} -> {candidate.id} ({mode})",
+        detail=f"{account.name} -> {candidate.id} ({mode}) [{provider}]",
         candidate=candidate.id,
         account=account.name,
         branch=branch,
@@ -552,13 +557,17 @@ def _dispatch_one(
     # already knows.
     _fresh_base_ref(repo_path)  # best-effort fetch; see its docstring
     TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
-    env = {**os.environ, "CLAUDE_CONFIG_DIR": str(account.config_dir)}
+    env = {
+        **os.environ,
+        "CLAUDE_CONFIG_DIR": str(account.config_dir),
+        "GEMINI_CONFIG_DIR": str(account.config_dir),
+    }
     argv = [
         "mycoder", "build",
         "--repo", f"{org}/{repo}",
         "--issue", number,
         "--source", str(repo_path),
-        "--session-runner", "claude",
+        "--session-runner", provider,
         "--max-budget-usd", str(max_budget_usd),
         "--max-turns", str(max_turns),
         "--session-timeout-s", str(session_timeout_s),
@@ -668,9 +677,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--accounts",
-        help="comma-separated CLAUDE_CONFIG_DIR paths, one per available worker "
-        "(each must already be `claude auth login`'d). Not required with "
+        help="comma-separated config dir paths, one per available worker. Not required with "
         "--abort/--clear-halt.",
+    )
+    parser.add_argument(
+        "--provider",
+        choices=["claude", "gemini"],
+        default="claude",
+        help="model provider for worker sessions (default: %(default)s)",
     )
     parser.add_argument("--execute", action="store_true", help="actually launch headless sessions")
     halt_group = parser.add_mutually_exclusive_group()
@@ -923,7 +937,18 @@ def main(argv: list[str] | None = None) -> int:
     # A fleet of accounts that are secretly the same account is not a fleet.
     # Always gate on distinct identities -- cheap, local, and it prevents silently
     # draining one account twice (which is exactly what happened once).
-    account_problems = _preflight_distinct_accounts(accounts)
+    if args.provider == "claude":
+        account_problems = _preflight_distinct_accounts(accounts)
+    else:
+        seen_dirs: set[str] = set()
+        account_problems = []
+        for account in accounts:
+            resolved = str(account.config_dir.resolve())
+            if resolved in seen_dirs:
+                account_problems.append(
+                    f"{account.name} ({account.config_dir}) duplicates another worker's config directory"
+                )
+            seen_dirs.add(resolved)
     if account_problems:
         print("account preflight failed — the configured accounts are not distinct:")
         for p in account_problems:
@@ -958,10 +983,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     # Overfetch the ranked pool so a worker slot falls through to the next
     # dispatchable candidate instead of sitting idle behind an undispatchable
-    # scaffold proposal.
-    pool: list[Recommendation] = orch.next_n(max(len(accounts) * 5, 20))
-    dispatchable = [r.chosen for r in pool if r.chosen is not None and r.chosen.kind == "issue"]
-    skipped = [r.chosen for r in pool if r.chosen is not None and r.chosen.kind != "issue"]
+    # scaffold proposal (#51).
+    fetch_count = max(len(accounts) * 10, 50)
+    pool: list[Recommendation] = orch.next_n(fetch_count)
+    candidates_pool = [r.chosen for r in pool if r.chosen is not None]
+    dispatchable = [c for c in candidates_pool if c.kind == "issue"]
+    skipped = [c for c in candidates_pool if c.kind != "issue"]
 
     if skipped:
         names = ", ".join(c.id for c in skipped)
@@ -1071,14 +1098,12 @@ def main(argv: list[str] | None = None) -> int:
     if pairs:
         # One worker thread per account: each `mycoder build` invocation gets
         # its own Workspace worktree (mythings.isolation.Workspace, inside
-        # my-coder) under its own CLAUDE_CONFIG_DIR, so nothing about running
+        # my-coder) under its own config dir, so nothing about running
         # them at the same time needs new isolation.
         with ThreadPoolExecutor(max_workers=len(pairs)) as pool:
-            futures = {
-                pool.submit(
-                    _dispatch_one,
-                    account,
-                    candidate,
+            futures = {}
+            for account, (candidate, prior) in pairs:
+                call_kw: dict[str, object] = dict(
                     execute=args.execute,
                     max_budget_usd=args.max_budget_usd,
                     max_turns=args.max_turns,
@@ -1087,9 +1112,13 @@ def main(argv: list[str] | None = None) -> int:
                     prior=prior,
                     ready_timeout=args.ready_timeout,
                     session_timeout_s=args.session_timeout_s,
-                ): (account, candidate)
-                for account, (candidate, prior) in pairs
-            }
+                )
+                if args.provider != "claude":
+                    call_kw["provider"] = args.provider
+                futures[pool.submit(_dispatch_one, account, candidate, **call_kw)] = (
+                    account,
+                    candidate,
+                )
             # future.exception() blocks until that future is done but, unlike
             # future.result(), never raises -- so one account's crash can't
             # stop us from also collecting every other account's outcome.
@@ -1101,6 +1130,26 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  [{account.name}] {candidate.id} crashed: {exc!r}")
     for account in accounts[len(plan) :]:
         print(f"\n=== {account.name}: no ready issue candidate ===")
+
+    if not pairs:
+        if candidates_pool:
+            dispatch_ledger.record(
+                tool="fleet_dispatch",
+                kind="dispatch",
+                outcome="no_dispatchable_candidates",
+                detail=(
+                    f"considered {len(candidates_pool)} candidate(s) from backlog, "
+                    f"but none were dispatchable ({len(skipped)} scaffolds skipped)"
+                ),
+                skipped_scaffolds=[c.id for c in skipped],
+            )
+        else:
+            dispatch_ledger.record(
+                tool="fleet_dispatch",
+                kind="dispatch",
+                outcome="backlog_empty",
+                detail="no candidates in backlog",
+            )
 
     if not args.execute:
         print("\n(dry run — pass --execute to actually launch these sessions)")

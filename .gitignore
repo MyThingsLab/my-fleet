@@ -14,4 +14,4 @@ htmlcov/
 *.jsonl.bak
 .mythings/
 .DS_Store
-.fleet-dispatch/
+.my-fleet/

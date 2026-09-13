@@ -31,6 +31,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 PROBE_PROMPT = "reply with exactly: ALIVE"
 PROBE_TOKEN = "ALIVE"
@@ -45,6 +46,15 @@ WORKSPACE_UNTRUSTED = "workspace_untrusted"
 # against stdout and stderr together because it does not consistently pick one.
 _AUTH_MARKERS = ("failed to authenticate", "oauth session expired", "invalid api key")
 
+_GEMINI_AUTH_MARKERS = (
+    "invalid api key",
+    "unauthenticated",
+    "permission denied",
+    "authentication failed",
+    "could not find credentials",
+    "unauthorized",
+)
+
 
 @dataclass(frozen=True)
 class AccountPreflight:
@@ -57,6 +67,12 @@ class AccountPreflight:
     @property
     def usable(self) -> bool:
         return self.outcome == OK
+
+
+class PreflightProvider(Protocol):
+    def check_account(
+        self, config_dir: str, workspace: Path, *, timeout: float = 120.0
+    ) -> AccountPreflight: ...
 
 
 def workspace_is_trusted(config_dir: str, workspace: Path) -> bool:
@@ -78,87 +94,180 @@ def workspace_is_trusted(config_dir: str, workspace: Path) -> bool:
     return bool(entry.get("hasTrustDialogAccepted"))
 
 
-def check_account(config_dir: str, workspace: Path, *, timeout: float = 120.0) -> AccountPreflight:
-    expanded = os.path.expanduser(config_dir)
-    if not os.path.isdir(expanded):
-        return AccountPreflight(
-            config_dir=expanded,
-            outcome=CONFIG_MISSING,
-            detail=f"config dir does not exist: {config_dir} (expanded: {expanded})",
-        )
+class ClaudePreflightProvider:
+    def check_account(
+        self, config_dir: str, workspace: Path, *, timeout: float = 120.0
+    ) -> AccountPreflight:
+        expanded = os.path.expanduser(config_dir)
+        if not os.path.isdir(expanded):
+            return AccountPreflight(
+                config_dir=expanded,
+                outcome=CONFIG_MISSING,
+                detail=f"config dir does not exist: {config_dir} (expanded: {expanded})",
+            )
 
-    trusted = workspace_is_trusted(expanded, workspace)
-    env = {**os.environ, "CLAUDE_CONFIG_DIR": expanded}
-    try:
-        proc = subprocess.run(
-            ["claude", "-p", PROBE_PROMPT, "--max-turns", "1"],
-            cwd=workspace,
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired:
-        return AccountPreflight(
-            config_dir=expanded,
-            outcome=PROBE_FAILED,
-            detail=f"auth probe timed out after {timeout:.0f}s",
-            trusted=trusted,
-        )
-    except OSError as exc:
-        return AccountPreflight(
-            config_dir=expanded,
-            outcome=PROBE_FAILED,
-            detail=f"could not run claude: {exc}",
-            trusted=trusted,
-        )
+        trusted = workspace_is_trusted(expanded, workspace)
+        env = {**os.environ, "CLAUDE_CONFIG_DIR": expanded}
+        try:
+            proc = subprocess.run(
+                ["claude", "-p", PROBE_PROMPT, "--max-turns", "1"],
+                cwd=workspace,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            return AccountPreflight(
+                config_dir=expanded,
+                outcome=PROBE_FAILED,
+                detail=f"auth probe timed out after {timeout:.0f}s",
+                trusted=trusted,
+            )
+        except OSError as exc:
+            return AccountPreflight(
+                config_dir=expanded,
+                outcome=PROBE_FAILED,
+                detail=f"could not run claude: {exc}",
+                trusted=trusted,
+            )
 
-    output = f"{proc.stdout}\n{proc.stderr}".strip()
-    lowered = output.lower()
-    if any(marker in lowered for marker in _AUTH_MARKERS):
-        return AccountPreflight(
-            config_dir=expanded,
-            outcome=AUTH_EXPIRED,
-            detail=output.splitlines()[0][:200] if output else "authentication failed",
-            trusted=trusted,
-        )
-    if proc.returncode != 0:
-        return AccountPreflight(
-            config_dir=expanded,
-            outcome=PROBE_FAILED,
-            detail=f"claude exited {proc.returncode}: {output[:200]}",
-            trusted=trusted,
-        )
-    if PROBE_TOKEN not in proc.stdout:
-        return AccountPreflight(
-            config_dir=expanded,
-            outcome=PROBE_FAILED,
-            detail=f"probe replied without {PROBE_TOKEN!r}: {proc.stdout.strip()[:200]}",
-            trusted=trusted,
-        )
+        output = f"{proc.stdout}\n{proc.stderr}".strip()
+        lowered = output.lower()
+        if any(marker in lowered for marker in _AUTH_MARKERS):
+            return AccountPreflight(
+                config_dir=expanded,
+                outcome=AUTH_EXPIRED,
+                detail=output.splitlines()[0][:200] if output else "authentication failed",
+                trusted=trusted,
+            )
+        if proc.returncode != 0:
+            return AccountPreflight(
+                config_dir=expanded,
+                outcome=PROBE_FAILED,
+                detail=f"claude exited {proc.returncode}: {output[:200]}",
+                trusted=trusted,
+            )
+        if PROBE_TOKEN not in proc.stdout:
+            return AccountPreflight(
+                config_dir=expanded,
+                outcome=PROBE_FAILED,
+                detail=f"probe replied without {PROBE_TOKEN!r}: {proc.stdout.strip()[:200]}",
+                trusted=trusted,
+            )
 
-    if not trusted:
+        if not trusted:
+            return AccountPreflight(
+                config_dir=expanded,
+                outcome=WORKSPACE_UNTRUSTED,
+                detail=(
+                    f"{workspace} is not trusted for this account, so its permissions.allow "
+                    "entries are ignored. Set projects[...].hasTrustDialogAccepted in the "
+                    "account's .claude.json, or accept the dialog once interactively."
+                ),
+                authenticated=True,
+            )
         return AccountPreflight(
             config_dir=expanded,
-            outcome=WORKSPACE_UNTRUSTED,
-            detail=(
-                f"{workspace} is not trusted for this account, so its permissions.allow "
-                "entries are ignored. Set projects[...].hasTrustDialogAccepted in the "
-                "account's .claude.json, or accept the dialog once interactively."
-            ),
+            outcome=OK,
+            detail=f"authenticated, and {workspace} is trusted",
             authenticated=True,
+            trusted=True,
         )
-    return AccountPreflight(
-        config_dir=expanded,
-        outcome=OK,
-        detail=f"authenticated, and {workspace} is trusted",
-        authenticated=True,
-        trusted=True,
+
+
+class GeminiPreflightProvider:
+    def check_account(
+        self, config_dir: str, workspace: Path, *, timeout: float = 120.0
+    ) -> AccountPreflight:
+        expanded = os.path.expanduser(config_dir)
+        if not os.path.isdir(expanded):
+            return AccountPreflight(
+                config_dir=expanded,
+                outcome=CONFIG_MISSING,
+                detail=f"config dir does not exist: {config_dir} (expanded: {expanded})",
+            )
+
+        bin_name = os.environ.get("GEMINI_CLI_BIN", "agy")
+        env = {**os.environ, "GEMINI_CONFIG_DIR": expanded}
+        try:
+            proc = subprocess.run(
+                [bin_name, "--version"],
+                cwd=workspace,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            return AccountPreflight(
+                config_dir=expanded,
+                outcome=PROBE_FAILED,
+                detail=f"auth probe timed out after {timeout:.0f}s",
+                trusted=True,
+            )
+        except OSError as exc:
+            return AccountPreflight(
+                config_dir=expanded,
+                outcome=PROBE_FAILED,
+                detail=f"could not run {bin_name}: {exc}",
+                trusted=True,
+            )
+
+        output = f"{proc.stdout}\n{proc.stderr}".strip()
+        lowered = output.lower()
+        if any(marker in lowered for marker in _GEMINI_AUTH_MARKERS):
+            return AccountPreflight(
+                config_dir=expanded,
+                outcome=AUTH_EXPIRED,
+                detail=output.splitlines()[0][:200] if output else "authentication failed",
+                trusted=True,
+            )
+        if proc.returncode != 0:
+            return AccountPreflight(
+                config_dir=expanded,
+                outcome=PROBE_FAILED,
+                detail=f"{bin_name} exited {proc.returncode}: {output[:200]}",
+                trusted=True,
+            )
+
+        return AccountPreflight(
+            config_dir=expanded,
+            outcome=OK,
+            detail=f"authenticated ({bin_name}), and {workspace} is accessible",
+            authenticated=True,
+            trusted=True,
+        )
+
+
+PREFLIGHT_PROVIDERS: dict[str, PreflightProvider] = {
+    "claude": ClaudePreflightProvider(),
+    "gemini": GeminiPreflightProvider(),
+}
+
+
+def get_preflight_provider(provider: str = "claude") -> PreflightProvider:
+    if provider not in PREFLIGHT_PROVIDERS:
+        raise ValueError(
+            f"unknown provider {provider!r}, expected one of {list(PREFLIGHT_PROVIDERS)}"
+        )
+    return PREFLIGHT_PROVIDERS[provider]
+
+
+def check_account(
+    config_dir: str, workspace: Path, *, timeout: float = 120.0, provider: str = "claude"
+) -> AccountPreflight:
+    return get_preflight_provider(provider).check_account(
+        config_dir, workspace, timeout=timeout
     )
 
 
 def select_accounts(
-    config_dirs: list[str], workspace: Path, *, timeout: float = 120.0
+    config_dirs: list[str],
+    workspace: Path,
+    *,
+    timeout: float = 120.0,
+    provider: str = "claude",
 ) -> tuple[list[AccountPreflight], list[AccountPreflight]]:
     """Split accounts into (usable, blocked), preserving input order.
 
@@ -168,7 +277,7 @@ def select_accounts(
     usable: list[AccountPreflight] = []
     blocked: list[AccountPreflight] = []
     for config_dir in config_dirs:
-        result = check_account(config_dir, workspace, timeout=timeout)
+        result = check_account(config_dir, workspace, timeout=timeout, provider=provider)
         (usable if result.usable else blocked).append(result)
     return usable, blocked
 
@@ -179,7 +288,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Check that each dispatch account can authenticate and run in the workspace."
     )
-    parser.add_argument("--accounts", required=True, help="comma-separated CLAUDE_CONFIG_DIR paths")
+    parser.add_argument(
+        "--accounts", required=True, help="comma-separated config dir paths"
+    )
+    parser.add_argument(
+        "--provider",
+        choices=list(PREFLIGHT_PROVIDERS),
+        default="claude",
+        help="model provider for authentication probe (default: %(default)s)",
+    )
     parser.add_argument("--workspace", default=str(WORKSPACE_ROOT))
     parser.add_argument("--timeout", type=float, default=120.0)
     parser.add_argument(
@@ -189,7 +306,10 @@ def main(argv: list[str] | None = None) -> int:
 
     config_dirs = [d.strip() for d in args.accounts.split(",") if d.strip()]
     usable, blocked = select_accounts(
-        config_dirs, Path(args.workspace).resolve(), timeout=args.timeout
+        config_dirs,
+        Path(args.workspace).resolve(),
+        timeout=args.timeout,
+        provider=args.provider,
     )
 
     # Same stream split as account_usage.main: stdout carries exactly one line
@@ -202,6 +322,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print(",".join(r.config_dir for r in usable))
     return 0 if usable else 1
+
 
 
 if __name__ == "__main__":

@@ -58,12 +58,15 @@ indefinitely, relying on Restart=on-failure for crash recovery.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
+import io
 import json
 import os
 import subprocess
 import sys
 import time
 from collections.abc import Callable
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -253,6 +256,9 @@ def _stage_dispatch(ctx: _Ctx) -> list[Stage]:
     if ctx.skip_dispatch:
         return []
     cmd = [ctx.py, "-m", "myfleet.fleet_dispatch", "--accounts", ctx.accounts]
+    provider = getattr(ctx.args, "provider", "claude")
+    if provider != "claude":
+        cmd += ["--provider", provider]
     if ctx.args.dispatch_execute:
         cmd.append("--execute")
     if ctx.args.allow_personal_token:
@@ -467,6 +473,41 @@ def _execute_stage(stage: Stage, *, execute: bool) -> None:
     _run(stage.argv, env=stage.env)
 
 
+def _execute_stage_buffered(stage: Stage, *, execute: bool) -> tuple[Stage, str, int]:
+    # Capture output per stage so concurrent stages don't scramble each other's stdout/stderr
+    buf = io.StringIO()
+    rc = 0
+    with redirect_stdout(buf), redirect_stderr(buf):
+        try:
+            _execute_stage(stage, execute=execute)
+        except Exception as exc:
+            print(f"Error executing {stage.name}: {exc}", file=sys.stderr)
+            rc = 1
+    return stage, buf.getvalue(), rc
+
+
+def _execute_wave(
+    stages: list[Stage], *, execute: bool, concurrency: int = 1
+) -> None:
+    if len(stages) <= 1 or concurrency <= 1:
+        for stage in stages:
+            _execute_stage(stage, execute=execute)
+        return
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
+        futures = [
+            executor.submit(_execute_stage_buffered, stage, execute=execute)
+            for stage in stages
+        ]
+        for future in futures:
+            stage, output, _ = future.result()
+            if output.strip():
+                print(f"--- [{stage.name}] ---")
+                sys.stdout.write(output)
+                if not output.endswith("\n"):
+                    sys.stdout.write("\n")
+
+
 def _run_cycle(args: argparse.Namespace, *, accounts: str, skip_dispatch: bool, py: str) -> None:
     # Heartbeats record liveness, not success -- proof the systemd unit's
     # ExecStart path still resolves and this process still reaches this line,
@@ -488,9 +529,11 @@ def _run_cycle(args: argparse.Namespace, *, accounts: str, skip_dispatch: bool, 
             return
 
     ctx = _Ctx(args=args, accounts=accounts, skip_dispatch=skip_dispatch, py=py)
+    concurrency = getattr(args, "concurrency", 1)
     for wave in build_waves():
         if len(wave) > 1:
             print(f"(wave: {', '.join(i.stage for i in wave)} — no dependency between them)")
+        wave_stages: list[Stage] = []
         for item in wave:
             if args.skip_bookkeeping and item.stage in BOOKKEEPING_STAGES:
                 print(f"(skipping {item.stage} — --skip-bookkeeping)")
@@ -499,8 +542,8 @@ def _run_cycle(args: argparse.Namespace, *, accounts: str, skip_dispatch: bool, 
             if resolver is None:
                 print(f"(no resolver for graph stage {item.stage!r} — skipping)")
                 continue
-            for stage in resolver(ctx):
-                _execute_stage(stage, execute=args.execute)
+            wave_stages.extend(resolver(ctx))
+        _execute_wave(wave_stages, execute=args.execute, concurrency=concurrency)
 
 
 def _loop_should_stop(
@@ -618,11 +661,19 @@ def _run_loop(args: argparse.Namespace, py: str) -> int:
             # account that cannot authenticate has no usage to read, and folding
             # it into "over the ceiling" would report a quota problem the fleet
             # can wait out instead of a login it has to be told about.
-            live, blocked = preflight.select_accounts(pool, WORKSPACE_ROOT)
+            provider = getattr(args, "provider", "claude")
+            preflight_kw: dict[str, object] = {}
+            usage_kw: dict[str, object] = {}
+            if provider != "claude":
+                preflight_kw["provider"] = provider
+                usage_kw["provider"] = provider
+            live, blocked = preflight.select_accounts(
+                pool, WORKSPACE_ROOT, **preflight_kw
+            )
             _record_preflight(dispatch_ledger, blocked)
             last_blocked = blocked
             usable, over = account_usage.select_accounts(
-                [p.config_dir for p in live], args.max_session_pct
+                [p.config_dir for p in live], args.max_session_pct, **usage_kw
             )
             usable_accounts = [u.config_dir for u in usable]
             last_account_check = now
@@ -788,6 +839,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--max-backoff-min", type=float, default=30.0, help="--loop only: backoff ceiling"
     )
+    parser.add_argument(
+        "--concurrency",
+        "-j",
+        type=int,
+        default=1,
+        help="max parallel tools to run concurrently within a single wave (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--provider",
+        choices=["claude", "gemini"],
+        default="claude",
+        help="model provider for worker sessions and usage tracking (default: %(default)s)",
+    )
     args = parser.parse_args(argv)
 
     if args.ask_human:
@@ -814,7 +878,10 @@ def main(argv: list[str] | None = None) -> int:
     # identity to prove and the probe is a real `claude` call per account.
     if args.dispatch_execute and not skip_dispatch:
         pool = [a.strip() for a in accounts.split(",") if a.strip()]
-        live, blocked = preflight.select_accounts(pool, WORKSPACE_ROOT)
+        preflight_kw = {"provider": args.provider} if args.provider != "claude" else {}
+        live, blocked = preflight.select_accounts(
+            pool, WORKSPACE_ROOT, **preflight_kw
+        )
         _record_preflight(Ledger(DISPATCH_LEDGER), blocked)
         if not live:
             print(

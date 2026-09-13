@@ -32,6 +32,14 @@ output to ignore the gate. It is not implemented here. `coverage_delta` is
 absent for the same reason -- no repo in the fleet reports it per-PR, so the
 check could only ever have been unevaluable.
 
+`lint_clean` and `types_clean` are absent because they are not separable: every
+repo runs ruff inside the same CI job `required_checks_pass` already reads, so a
+separate check would either duplicate that evidence or invent new evidence by
+running the tooling here, which is not what a gate reading GitHub should do.
+
+Beyond the four conditions, `no_new_dependency` is checked but can only ever
+pass or escalate -- see its comment in `assess()`.
+
 ## Trust boundary
 
 Every input here comes from GitHub's API, never from the PR's own content.
@@ -48,6 +56,7 @@ import json
 import re
 import subprocess
 import sys
+import tomllib
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -64,7 +73,9 @@ ORG = "MyThingsLab"
 SHARED_CARVE_OUTS: tuple[tuple[str, str], ...] = (
     # The constraints on agents. An agent that can merge a relaxation of its own
     # constraints has no constraints, only a delay.
+    ("AGENTS.md", "the rules that constrain agents"),
     ("CLAUDE.md", "the rules that constrain agents"),
+    ("GEMINI.md", "the rules that constrain agents"),
     ("HARNESS.md", "the build harness contract"),
     (".github/workflows/", "CI definitions -- the evidence this gate relies on"),
     (".claude/", "agent permissions and settings"),
@@ -85,6 +96,9 @@ REPO_CARVE_OUTS: dict[str, tuple[tuple[str, str], ...]] = {
         ("src/myfleet/merge_ready_prs.py", "a myfleet merge path"),
         ("src/myfleet/merge_order_prs.py", "a myfleet merge path"),
         ("src/myfleet/fleet_dispatch.py", "the dispatch path that opens PRs"),
+        ("src/myfleet/fleet_cycle.py", "the autonomous cycle loop driver"),
+        ("src/myfleet/cycle_driver.py", "the cycle driver controls"),
+        ("src/myfleet/preflight.py", "preflight dispatch invariants"),
     ),
     "my-coder": (
         ("src/mycoder/coder.py", "where the PR-open action is gated"),
@@ -174,6 +188,57 @@ def changed_files(repo: str, number: int) -> list[dict] | None:
     return json.loads(out).get("files") or []
 
 
+def _requirement_name(spec: str) -> str:
+    # "my-things-core @ git+https://...@v1.0.0" -> "my-things-core";
+    # "pytest-cov>=5" -> "pytest-cov". Only the distribution name matters here:
+    # a version bump is a `kind:chore` this gate is happy to clear, a brand new
+    # import in the dependency tree is not.
+    name = re.split(r"[<>=!~;@\[\s]", spec.strip(), maxsplit=1)[0]
+    return name.strip().lower().replace("_", "-")
+
+
+def dependency_names(repo: str, path: str, ref: str) -> frozenset[str] | None:
+    # None means "could not read", never "no dependencies" -- an unreadable
+    # pyproject has to stay unevaluable rather than collapse into an empty set
+    # that makes every dependency look pre-existing.
+    code, out, _ = _gh(
+        [
+            "api",
+            f"repos/{ORG}/{repo}/contents/{path}?ref={ref}",
+            "-H",
+            "Accept: application/vnd.github.raw",
+        ]
+    )
+    if code != 0:
+        return None
+    try:
+        data = tomllib.loads(out)
+    except tomllib.TOMLDecodeError:
+        return None
+    project = data.get("project") or {}
+    specs = list(project.get("dependencies") or [])
+    for group in (project.get("optional-dependencies") or {}).values():
+        specs.extend(group)
+    return frozenset(_requirement_name(s) for s in specs if isinstance(s, str))
+
+
+def pyproject_paths(paths: list[str]) -> list[str]:
+    return [p for p in paths if p == "pyproject.toml" or p.endswith("/pyproject.toml")]
+
+
+def new_dependencies(repo: str, paths: list[str], base: str, head: str) -> frozenset[str] | None:
+    # Every changed pyproject.toml, compared name-set to name-set across the
+    # PR's two ends. None if any of them could not be read.
+    added: set[str] = set()
+    for path in paths:
+        before = dependency_names(repo, path, base)
+        after = dependency_names(repo, path, head)
+        if before is None or after is None:
+            return None
+        added |= after - before
+    return frozenset(added)
+
+
 def carve_outs_for_repo(repo: str) -> tuple[tuple[str, str], ...]:
     # An unknown repo gets the shared set, never an empty one. Most of the ~44
     # repos are not in the map and never will be, so the default is the case
@@ -204,7 +269,7 @@ def assess(repo: str, number: int) -> Assessment:
             "--repo",
             f"{ORG}/{repo}",
             "--json",
-            "isDraft,body,mergeable,mergeStateStatus,state",
+            "isDraft,body,mergeable,mergeStateStatus,state,baseRefOid,headRefOid",
         ]
     )
     if code != 0:
@@ -255,6 +320,26 @@ def assess(repo: str, number: int) -> Assessment:
     if carved:
         path, why = carved
         found.checks.append(Check("no_carve_out", None, f"touches {path} — {why}"))
+
+    # A new dependency is never REJECTED -- taking one on is a legitimate
+    # decision, just not this gate's to make. Note what is *not* accepted as
+    # evidence: the issue's "or one declared" half would have let a PR body
+    # naming the dependency clear the check, and a PR body is exactly the input
+    # the trust boundary above refuses to read. There is no way to declare a
+    # dependency to this gate; there is only a human.
+    manifests = pyproject_paths(paths)
+    if not manifests:
+        found.checks.append(Check("no_new_dependency", True, "no pyproject.toml in the diff"))
+    else:
+        added = new_dependencies(repo, manifests, pr["baseRefOid"], pr["headRefOid"])
+        if added is None:
+            found.checks.append(
+                Check("no_new_dependency", None, "could not read a changed pyproject.toml")
+            )
+        elif added:
+            found.checks.append(Check("no_new_dependency", None, f"adds {', '.join(sorted(added))}"))
+        else:
+            found.checks.append(Check("no_new_dependency", True, "no dependency added"))
 
     issue = closing_issue(pr.get("body") or "")
     if issue is None:
