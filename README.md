@@ -156,8 +156,11 @@ dispatch step, arming the marker halts that path too.
 - **[`myfleet.red_main`](src/myfleet/red_main.py)** — watches every kernel
   repo's `main`. A red one becomes a `prio:P0` issue (priority via
   `mythings.labels.escalate`, not a local opinion) and is closed again on
-  recovery. Runs in wave 0 of the cycle, ahead of dispatch, so workers are not
-  sent at a repo whose base is already broken.
+  recovery. It is *meant* to run ahead of dispatch, so workers are not sent at
+  a repo whose base is already broken — but it has a resolver in `RESOLVERS`
+  and **no node in `mypipeline`'s `workflows.json`**, and the driver only walks
+  `build_waves()`. So the cycle never invokes it today; run it by hand
+  (`python3 -m myfleet.red_main --execute`) until the graph node exists.
 
 ## Install (development)
 
