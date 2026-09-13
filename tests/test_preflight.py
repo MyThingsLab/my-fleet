@@ -194,3 +194,71 @@ def test_main_exits_nonzero_when_no_account_can_work(tmp_path: Path, monkeypatch
 
     assert code == 1
     assert capsys.readouterr().out.strip() == ""
+
+
+def test_gemini_preflight_success(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    config_dir = tmp_path / "gemini_config"
+    config_dir.mkdir()
+
+    monkeypatch.setattr(
+        pf.subprocess, "run", lambda cmd, **kw: _completed(0, stdout="agy 0.1.0\n")
+    )
+
+    result = pf.check_account(str(config_dir), workspace, provider="gemini")
+    assert result.outcome == pf.OK
+    assert result.usable
+    assert result.authenticated
+    assert result.trusted
+
+
+def test_gemini_preflight_auth_expired(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    config_dir = tmp_path / "gemini_config"
+    config_dir.mkdir()
+
+    monkeypatch.setattr(
+        pf.subprocess,
+        "run",
+        lambda cmd, **kw: _completed(1, stderr="Error: invalid api key provided"),
+    )
+
+    result = pf.check_account(str(config_dir), workspace, provider="gemini")
+    assert result.outcome == pf.AUTH_EXPIRED
+    assert not result.usable
+
+
+def test_gemini_preflight_missing_config(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    result = pf.check_account(str(tmp_path / "nonexistent"), workspace, provider="gemini")
+    assert result.outcome == pf.CONFIG_MISSING
+    assert not result.usable
+
+
+def test_main_with_gemini_provider(tmp_path: Path, monkeypatch, capsys) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    config_dir = tmp_path / "gemini_config"
+    config_dir.mkdir()
+
+    monkeypatch.setattr(
+        pf.subprocess, "run", lambda cmd, **kw: _completed(0, stdout="agy 0.1.0\n")
+    )
+
+    code = pf.main(
+        [
+            "--accounts",
+            str(config_dir),
+            "--workspace",
+            str(workspace),
+            "--provider",
+            "gemini",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert code == 0
+    assert captured.out.strip() == str(config_dir)
+
