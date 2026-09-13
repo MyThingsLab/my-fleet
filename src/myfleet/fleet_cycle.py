@@ -446,7 +446,18 @@ def _stage_telegram(ctx: _Ctx) -> list[Stage]:
     return [Stage("mytelegrambot", ["mytelegrambot", "notify"])]
 
 
+def _stage_red_main(ctx: _Ctx) -> list[Stage]:
+    # Wave 0, alongside myplanner and ahead of dispatch: workers sent at a repo
+    # whose main is already failing inherit a broken base, and their PRs come
+    # back red for a reason that has nothing to do with the diff.
+    #
+    # In-process would be cheaper, but every other stage here is a
+    # `gh`-attributed, ledger-recorded subprocess and this one is no different.
+    return [Stage("red-main", [ctx.py, "-m", "myfleet.red_main", "--execute"])]
+
+
 RESOLVERS: dict[str, Callable[[_Ctx], list[Stage]]] = {
+    "red-main": _stage_red_main,
     "myplanner": _stage_planner,
     "fleet-dispatch": _stage_dispatch,
     "myresearcher": _stage_researcher,
