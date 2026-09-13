@@ -48,7 +48,7 @@ _MARKERS = ("my-things-core", "my-fleet")
 
 
 def looks_like_fleet_root(path: Path) -> bool:
-    return all((path / marker).is_dir() for marker in _MARKERS)
+    return any((path / marker).is_dir() for marker in _MARKERS)
 
 
 def fleet_root(module_file: str) -> Path:

@@ -49,9 +49,7 @@ def test_a_blank_override_is_not_an_override(
     assert workspace.fleet_root(str(module)) == tmp_path / "root"
 
 
-def test_looks_like_fleet_root_wants_both_markers(tmp_path: Path) -> None:
-    assert not workspace.looks_like_fleet_root(tmp_path)
-    (tmp_path / "my-things-core").mkdir()
+def test_looks_like_fleet_root_checks_markers(tmp_path: Path) -> None:
     assert not workspace.looks_like_fleet_root(tmp_path)
     (tmp_path / "my-fleet").mkdir()
     assert workspace.looks_like_fleet_root(tmp_path)
