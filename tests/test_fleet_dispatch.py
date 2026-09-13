@@ -1526,3 +1526,125 @@ def test_dispatch_one_records_minimal_usage_entry(tmp_path: Path, monkeypatch) -
     (usage,) = [e for e in ledger.read() if e.kind == "usage"]
     assert usage.data["cost_usd"] == 0.42
 
+
+def test_main_scaffolds_do_not_consume_slots_when_issues_exist(
+    tmp_path: Path, monkeypatch
+) -> None:
+    scaffold = fd.Candidate(
+        id="scaffold:my-scaffold", repo="my-scaffold", tool="", title="t0", kind="scaffold", created_at="2020-01-01"
+    )
+    issue = fd.Candidate(
+        id="repo#1", repo="repo", tool="", title="t1", kind="issue", created_at="2020-01-01"
+    )
+
+    class FakeRecommendation:
+        def __init__(self, chosen: fd.Candidate) -> None:
+            self.chosen = chosen
+
+    class FakeOrchestrator:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def next_n(self, _n: int) -> list[FakeRecommendation]:
+            return [FakeRecommendation(scaffold), FakeRecommendation(issue)]
+
+    monkeypatch.setattr(fd, "Orchestrator", FakeOrchestrator)
+    monkeypatch.setattr(fd, "_preflight_distinct_accounts", lambda accounts: [])
+    monkeypatch.setattr(fd, "_open_pr_number", lambda *a, **k: None)
+    monkeypatch.setattr(fd, "_last_attempt", lambda *a, **k: None)
+
+    dispatched = []
+    monkeypatch.setattr(fd, "_dispatch_one", lambda *a, **k: dispatched.append(a))
+
+    rc = fd.main(["--accounts", str(tmp_path / "a")])
+    assert rc == 0
+    assert len(dispatched) == 1
+    # Issue was dispatched even though scaffold was top of pool
+    assert dispatched[0][1].id == "repo#1"
+
+
+def test_main_records_no_dispatchable_candidates_when_only_scaffolds(
+    tmp_path: Path, monkeypatch
+) -> None:
+    dispatch_ledger_path = tmp_path / "ledger.jsonl"
+    monkeypatch.setattr(fd, "DISPATCH_LEDGER", dispatch_ledger_path)
+
+    scaffold = fd.Candidate(
+        id="scaffold:my-scaffold", repo="my-scaffold", tool="", title="t0", kind="scaffold", created_at="2020-01-01"
+    )
+
+    class FakeRecommendation:
+        def __init__(self, chosen: fd.Candidate) -> None:
+            self.chosen = chosen
+
+    class FakeOrchestrator:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def next_n(self, _n: int) -> list[FakeRecommendation]:
+            return [FakeRecommendation(scaffold)]
+
+    monkeypatch.setattr(fd, "Orchestrator", FakeOrchestrator)
+    monkeypatch.setattr(fd, "_preflight_distinct_accounts", lambda accounts: [])
+    monkeypatch.setattr(fd, "_open_pr_number", lambda *a, **k: None)
+    monkeypatch.setattr(fd, "_last_attempt", lambda *a, **k: None)
+
+    rc = fd.main(["--accounts", str(tmp_path / "a")])
+    assert rc == 0
+
+    ledger = Ledger(dispatch_ledger_path)
+    entries = ledger.read(tool="fleet_dispatch")
+    assert any(e.outcome == "no_dispatchable_candidates" for e in entries)
+
+
+def test_main_records_backlog_empty_when_no_candidates(
+    tmp_path: Path, monkeypatch
+) -> None:
+    dispatch_ledger_path = tmp_path / "ledger.jsonl"
+    monkeypatch.setattr(fd, "DISPATCH_LEDGER", dispatch_ledger_path)
+
+    class FakeOrchestrator:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def next_n(self, _n: int) -> list:
+            return []
+
+    monkeypatch.setattr(fd, "Orchestrator", FakeOrchestrator)
+    monkeypatch.setattr(fd, "_preflight_distinct_accounts", lambda accounts: [])
+
+    rc = fd.main(["--accounts", str(tmp_path / "a")])
+    assert rc == 0
+
+    ledger = Ledger(dispatch_ledger_path)
+    entries = ledger.read(tool="fleet_dispatch")
+    assert any(e.outcome == "backlog_empty" for e in entries)
+
+
+def test_dispatch_one_uses_gemini_runner_when_provider_is_gemini(
+    tmp_path: Path, monkeypatch
+) -> None:
+    candidate, account, ledger = _setup_dispatch_one_repo(tmp_path, monkeypatch)
+    captured_argv: list[str] = []
+
+    def fake_run(argv, **kwargs):
+        captured_argv.extend(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout=json.dumps({"outcome": "no_changes", "detail": "ok"}), stderr="")
+
+    monkeypatch.setattr(fd.subprocess, "run", fake_run)
+
+    fd._dispatch_one(
+        account,
+        candidate,
+        execute=True,
+        max_budget_usd=1.0,
+        max_turns=10,
+        ledger=ledger,
+        org="MyThingsLab",
+        provider="gemini",
+    )
+
+    idx = captured_argv.index("--session-runner")
+    assert captured_argv[idx + 1] == "gemini"
+
+
