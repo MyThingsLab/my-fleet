@@ -16,6 +16,7 @@ def _no_halt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # shell out to `gh search issues` for the critical-issue gate. Tests that
     # exercise the gate override these explicitly.
     monkeypatch.setattr(fc, "HALT_MARKER", tmp_path / "HALT")
+    monkeypatch.setattr(fc, "DISPATCH_LEDGER", tmp_path / "ledger.jsonl")
     monkeypatch.setattr(fc, "_critical_halt_issues", lambda org: [])
 
 

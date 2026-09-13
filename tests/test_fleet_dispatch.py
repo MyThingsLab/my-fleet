@@ -21,6 +21,13 @@ from myfleet.fleet_usage import family_for
 _REAL_SUBPROCESS_RUN = subprocess.run
 
 
+@pytest.fixture(autouse=True)
+def _isolate_dispatch_ledger(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(fd, "DISPATCH_LEDGER", tmp_path / "ledger.jsonl")
+    monkeypatch.setattr(fd, "HALT_MARKER", tmp_path / "HALT")
+
+
+
 def _init_git_repo(path: Path) -> None:
     subprocess.run(["git", "-C", str(path), "init", "-q"], check=True)
     subprocess.run(["git", "-C", str(path), "config", "user.email", "t@t"], check=True)
