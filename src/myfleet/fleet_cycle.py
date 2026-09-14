@@ -93,8 +93,8 @@ build_waves = import_or_die("mypipeline.plan", "build_waves", "my-pipeline")
 # dir when this module is imported from a Workspace worktree (#48).
 WORKSPACE_ROOT = fleet_root(__file__)
 ORG = "MyThingsLab"
-TRACKING_REPO = f"{ORG}/my-things-core"
-TRACKING_ISSUE = "1"
+TRACKING_REPO = f"{ORG}/my-fleet"
+TRACKING_ISSUE = "121"
 PROJECT_NUMBER = "1"
 DOCS_SITE_CLONE = "mythingslab-site-genesis"
 
