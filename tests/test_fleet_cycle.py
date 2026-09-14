@@ -189,7 +189,7 @@ def test_cycle_announces_the_researcher_tester_changelogger_wave(
     (tmp_path / fc.DOCS_SITE_CLONE).mkdir()
     fc.main(["--accounts", "/tmp/acct", "--skip-dispatch", "--execute", "--brief-count", "0"])
     out = capsys.readouterr().out
-    assert "wave: myresearcher, mytester, mychangelogger" in out
+    assert "wave: mytodo, myresearcher, mytester, mychangelogger" in out
 
 
 def test_execute_runs_mypipeline_sync_handoff_stage(
