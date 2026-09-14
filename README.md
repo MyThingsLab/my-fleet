@@ -131,6 +131,28 @@ and refuses outright if it's there (a dry run still reports normally, just
 with a note). Since `fleet_cycle` shells out to `fleet_dispatch` for its
 dispatch step, arming the marker halts that path too.
 
+## Spend tripwire
+
+`--max-budget-usd`/`--max-daily-usd` bound spend, but a cap that trips still
+means the operator finds out only after the fact — a digest, or the fleet
+silently going idle. `fleet_dispatch` pushes a Telegram alert (via
+`mytelegrambot alert-spend`) the first time a UTC day's projected spend
+crosses `--spend-alert-fraction` (default `0.8`) of the effective
+`--max-daily-usd`, carrying **Halt** and **Raise cap** buttons — so the
+operator hears about the burn while it's still happening, not after:
+
+- **Halt** shells into `python3 -m myfleet.fleet_dispatch --abort`, the same
+  kill switch marker described above.
+- **Raise cap** shells into `python3 -m myfleet.fleet_dispatch
+  --raise-daily-cap AMOUNT`, which writes a day-scoped override
+  (`.my-fleet/daily-cap-override.json`) that reverts to `--max-daily-usd` on
+  its own the next UTC day.
+
+At most one alert is pushed per UTC day (a threshold crossed once stays
+crossed; re-alerting every dispatch loop iteration would just be noise the
+operator learns to ignore), and a failed push never blocks a run — it's a
+best-effort notification, not a gate.
+
 ## Other modules
 
 - **[`myfleet.fleet_test`](src/myfleet/fleet_test.py)** — the cross-repo test
