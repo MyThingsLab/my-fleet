@@ -535,6 +535,14 @@ _RESUMABLE_OUTCOMES = frozenset({"needs_review", "no_changes", "failed", "deferr
 # is fine, the fleet just couldn't run right then, so retrying it must not burn
 # the budget that escalates a genuinely-stuck issue to a human.
 _COUNTED_OUTCOMES = _TERMINAL_OUTCOMES - {"deferred"}
+# Outcomes that mean a worker actually took an issue this run: it started, or it
+# reached some terminal verdict. Every *other* dispatch outcome
+# ("backlog_empty", "no_dispatchable_candidates", "halted_critical") is a note
+# that nothing happened. Exported because fleet_cycle's --loop has to tell those
+# apart to decide whether to back off, and inferring it from "did the ledger
+# grow" counts the idle notes as work (#105). Deliberately a positive list: a
+# new not-actually-work outcome added later is treated as idle by default.
+WORK_OUTCOMES = _TERMINAL_OUTCOMES | {"started"}
 # Substrings that mark a failure as transient/infrastructure rather than a real
 # problem with the issue. Matched case-insensitively against the worker's final
 # message. Kept deliberately narrow -- only unambiguous capacity/transport
