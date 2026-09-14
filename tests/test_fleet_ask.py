@@ -256,6 +256,23 @@ def test_enable_refuses_when_the_ask_binary_cannot_be_run(
     assert "MYTHINGS_ASK_CMD" not in env  # nothing armed
 
 
+def test_ask_channel_probes_daemon_on_nonzero_exit_and_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #72: When a channel returns non-zero, Guard probes the daemon. If it has died,
+    # it raises AskChannelUnavailable rather than recording a false human DENY.
+    from myguard.ask import SubprocessAsk
+    from mythings.policy import Action
+
+    monkeypatch.setattr(fleet_ask, "daemon_is_running", lambda: False)
+    channel = SubprocessAsk("false", liveness_check=fleet_ask.daemon_is_running)
+    action = Action(kind="pr-merge", payload={})
+
+    with pytest.raises(fleet_ask.AskChannelUnavailable, match="daemon is not running"):
+        channel(action)
+
+
+
 def test_enable_refuses_when_the_bot_credentials_are_missing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

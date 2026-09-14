@@ -21,6 +21,8 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from myguard.ask import AskChannelUnavailable
+
 from myfleet.workspace import fleet_root
 
 # Climbs myfleet/<file>.py -> src -> my-fleet -> MyThingsLab/ (the fleet root),
@@ -49,10 +51,6 @@ DEFAULT_ASK_TIMEOUT = 300
 # What `mytelegrambot ask` reads from the environment at startup. Never logged, never
 # written anywhere -- only their presence is ever checked.
 TELEGRAM_CREDENTIALS = ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")
-
-
-class AskChannelUnavailable(RuntimeError):
-    pass
 
 
 def ask_binary() -> Path | None:
