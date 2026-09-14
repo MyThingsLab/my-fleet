@@ -2070,28 +2070,58 @@ def test_dispatch_one_injects_graph_path(tmp_path: Path, monkeypatch) -> None:
     assert graph_file.name == "graph.sqlite"
 
 
-def test_repo_wave_hierarchy() -> None:
-    assert fd._repo_wave("my-things-core") == 0
-    assert fd._repo_wave("my-fleet") == 1
-    assert fd._repo_wave("my-coder") == 1
-    assert fd._repo_wave("my-dashboard") == 2
-    assert fd._repo_wave("my-site") == 2
-    assert fd._repo_wave("external-tool") == 3
+def test_main_preserves_orchestrator_priority_order_over_lane(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # Regression test for #104. `mythings.labels.sort_key` ranks prio above
+    # lane, so the orchestrator hands back a product P0 ahead of a kernel P3.
+    # A second sort keyed on lane in the dispatcher made lane primary again and
+    # flipped these two; with only one account, the flip decides which issue
+    # gets worked and which waits for the next tick.
+    dispatched: list[str] = []
 
+    def fake_dispatch_one(account, candidate, **_kwargs):
+        dispatched.append(candidate.id)
 
-def test_sort_candidates_by_wave() -> None:
-    c_product = fd.Candidate(
-        id="my-dashboard#5", repo="my-dashboard", tool="my-dashboard", title="t1", kind="issue", created_at="2026-09-13T20:00:00Z"
-    )
-    c_core = fd.Candidate(
-        id="my-things-core#10", repo="my-things-core", tool="my-things-core", title="t2", kind="issue", created_at="2026-09-13T20:00:00Z"
-    )
-    c_kernel = fd.Candidate(
-        id="my-fleet#80", repo="my-fleet", tool="my-fleet", title="t3", kind="issue", created_at="2026-09-13T20:00:00Z"
-    )
+    monkeypatch.setattr(fd, "_dispatch_one", fake_dispatch_one)
+    monkeypatch.setattr(fd, "_last_attempt", lambda *a, **k: None)
 
-    candidates = [c_product, c_core, c_kernel]
-    sorted_candidates = fd.sort_candidates_by_wave(candidates)
+    candidates = [
+        fd.Candidate(
+            id="my-dashboard#5",
+            repo="my-dashboard",  # lane:product, prio:P0
+            tool="my-dashboard",
+            title="P0 in a product repo",
+            kind="issue",
+            created_at="2026-09-13T20:00:00Z",
+        ),
+        fd.Candidate(
+            id="my-fleet#80",
+            repo="my-fleet",  # lane:kernel, prio:P3
+            tool="my-fleet",
+            title="P3 in a kernel repo",
+            kind="issue",
+            created_at="2026-09-13T20:00:00Z",
+        ),
+    ]
 
-    assert [c.repo for c in sorted_candidates] == ["my-things-core", "my-fleet", "my-dashboard"]
+    class FakeRecommendation:
+        def __init__(self, chosen: fd.Candidate) -> None:
+            self.chosen = chosen
+
+    class FakeOrchestrator:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def next_n(self, _n: int) -> list[FakeRecommendation]:
+            return [FakeRecommendation(c) for c in candidates]
+
+    monkeypatch.setattr(fd, "Orchestrator", FakeOrchestrator)
+    monkeypatch.setattr(fd, "_preflight_distinct_accounts", lambda accounts: [])
+    monkeypatch.setattr(fd, "_open_pr_number", lambda *a, **k: None)
+
+    rc = fd.main(["--accounts", str(tmp_path / "a")])
+
+    assert rc == 0
+    assert dispatched == ["my-dashboard#5"]
 

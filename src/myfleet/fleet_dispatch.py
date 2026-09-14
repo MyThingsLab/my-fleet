@@ -265,44 +265,6 @@ def _parse_accounts(raw: str) -> list[Account]:
     return accounts
 
 
-_KERNEL_REPOS = frozenset({
-    "my-fleet",
-    "my-orchestrator",
-    "my-coder",
-    "my-searcher",
-    "my-guard",
-    "my-telegram-bot",
-    "my-pipeline",
-    "my-scaffolder",
-    "my-planner",
-    "my-tester",
-    "my-reporter",
-    "my-changelogger",
-})
-
-
-def _repo_wave(repo_name: str) -> int:
-    """Return topographical architectural wave for a repo:
-    0: core (my-things-core)
-    1: kernel (core orchestration & developer tooling)
-    2: product (product tools)
-    3: external
-    """
-    if repo_name == "my-things-core":
-        return 0
-    if repo_name in _KERNEL_REPOS:
-        return 1
-    if repo_name.startswith("my-"):
-        return 2
-    return 3
-
-
-def sort_candidates_by_wave(candidates: list[Candidate]) -> list[Candidate]:
-    """Sort candidates by architectural wave (core -> kernel -> product -> external)."""
-    return sorted(candidates, key=lambda c: _repo_wave(c.repo))
-
-
-
 def _account_uuid(config_dir: Path) -> str | None:
     # The account a config dir is logged into is recorded by `claude auth login`
     # in .claude.json under oauthAccount. Read-only; no token is touched.
@@ -1279,8 +1241,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"skipping (already has an open fleet-dispatch PR): {names}")
         dispatchable = [c for c in dispatchable if c.id not in ids]
 
-    dispatchable = sort_candidates_by_wave(dispatchable)
-
+    # No re-sort here, deliberately. The order `Orchestrator.next_n` returned is
+    # `mythings.labels.sort_key`'s, which ranks priority above lane on purpose;
+    # a second pass keyed on lane makes lane primary again and demotes every
+    # `prio:P0` outside core behind every `prio:P3` inside it. "Core stays
+    # stable" is already carried by that key's lane tiebreak, where it decides
+    # among equals instead of overruling them.
     dispatch_ledger = Ledger(DISPATCH_LEDGER)
 
     # Resume/recover routing: read each issue's last attempt and decide whether
