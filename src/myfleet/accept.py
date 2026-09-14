@@ -436,7 +436,6 @@ def settle(
             from myguard import Guard
             from myguard.rules import MERGE_ACTION
             from mythings.policy import Action, Decision
-
             guard = Guard()
         except ImportError:
             guard = None
@@ -490,7 +489,6 @@ def settle(
             if ask_human and guard is not None:
                 from myguard.rules import MERGE_ACTION
                 from mythings.policy import Action, Decision
-
                 action = Action(
                     kind=MERGE_ACTION,
                     payload={"repo": f"{ORG}/{repo}", "number": number, "title": title},
