@@ -944,6 +944,30 @@ def _dispatch_one(
         _deregister_worker(account.name)
 
 
+def route_candidate_params(
+    candidate: Candidate,
+    *,
+    default_provider: str = "claude",
+    default_max_budget_usd: float = 3.0,
+    default_max_turns: int = 40,
+    route: bool = True,
+) -> tuple[str, float, int]:
+    """Route provider, budget, and turn limits based on candidate size and kind labels."""
+    if not route:
+        return default_provider, default_max_budget_usd, default_max_turns
+
+    facets = candidate.facets()
+    size = (facets.size or "").upper()
+    kind = (facets.kind or "").lower()
+
+    if size == "S" and kind in ("chore", "docs", "test"):
+        budget = min(default_max_budget_usd, 1.0)
+        turns = min(default_max_turns, 20)
+        return default_provider, budget, turns
+
+    return default_provider, default_max_budget_usd, default_max_turns
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -956,6 +980,11 @@ def main(argv: list[str] | None = None) -> int:
         choices=["claude", "gemini"],
         default="claude",
         help="model provider for worker sessions (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--no-route",
+        action="store_true",
+        help="disable candidate budget/turns routing based on size/kind labels",
     )
     parser.add_argument("--execute", action="store_true", help="actually launch headless sessions")
     halt_group = parser.add_mutually_exclusive_group()
@@ -1399,18 +1428,25 @@ def main(argv: list[str] | None = None) -> int:
 
                 candidate, prior = item
                 repo_name = candidate.id.split("#")[0]
+                eff_provider, eff_budget, eff_turns = route_candidate_params(
+                    candidate,
+                    default_provider=args.provider,
+                    default_max_budget_usd=args.max_budget_usd,
+                    default_max_turns=args.max_turns,
+                    route=not getattr(args, "no_route", False),
+                )
                 call_kw: dict[str, object] = dict(
                     execute=args.execute,
-                    max_budget_usd=args.max_budget_usd,
-                    max_turns=args.max_turns,
+                    max_budget_usd=eff_budget,
+                    max_turns=eff_turns,
                     ledger=dispatch_ledger,
                     org=args.org,
                     prior=prior,
                     ready_timeout=args.ready_timeout,
                     session_timeout_s=args.session_timeout_s,
                 )
-                if args.provider != "claude":
-                    call_kw["provider"] = args.provider
+                if eff_provider != "claude":
+                    call_kw["provider"] = eff_provider
                 try:
                     with queue_lock:
                         dispatched_candidates.append(candidate)
