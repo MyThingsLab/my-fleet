@@ -463,6 +463,19 @@ def test_dispatch_decision_deferred_always_resumes() -> None:
     assert fd._dispatch_decision(deferred, blocker_open=False, max_attempts=3) == "resume"
 
 
+def test_human_telegram_retry_resumes_needs_human_candidate(tmp_path: Path) -> None:
+    # Issue my-fleet#65: When an operator taps "Retry" on a blocker escalation,
+    # blocker_decision outcome="retry" entry allows the candidate to resume.
+    led = Ledger(tmp_path / "l.jsonl")
+    led.record("fleet_dispatch", "dispatch", "needs_human", candidate="r#65", branch="b")
+    led.record("mytelegrambot", "blocker_decision", "retry", candidate="r#65", detail="retry from chat")
+
+    attempt = fd._last_attempt(led, "r#65")
+    assert attempt is not None
+    assert attempt.has_human_retry is True
+    assert fd._dispatch_decision(attempt, blocker_open=False, max_attempts=3) == "resume"
+
+
 def test_main_resumes_or_skips_by_prior_attempt(
     tmp_path: Path, monkeypatch, telegram: list[tuple[str, dict]]
 ) -> None:
