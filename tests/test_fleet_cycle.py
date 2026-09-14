@@ -489,6 +489,15 @@ class _FakeClock:
         self.now += seconds
 
 
+class _StopLoop(Exception):
+    """Breaks out of _run_loop from a faked _run_cycle after a set number of passes.
+
+    Bounding by iteration rather than by the fake clock matters for the backoff
+    tests: a loop that fails to sleep also fails to advance a clock whose only
+    motion is sleep, so a clock-bounded test would hang instead of failing.
+    """
+
+
 def _loop_ns(**overrides: object) -> argparse.Namespace:
     defaults: dict[str, object] = dict(
         accounts="/tmp/acct1,/tmp/acct2",
@@ -572,6 +581,105 @@ def test_next_backoff_doubles_and_caps_when_idle() -> None:
     )
 
 
+@pytest.mark.parametrize("idle_outcome", ["backlog_empty", "no_dispatchable_candidates", "halted_critical"])
+def test_an_idle_dispatch_entry_still_backs_off_and_sleeps(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, idle_outcome: str
+) -> None:
+    # Regression test for #105. fleet_dispatch records a ledger entry on each
+    # of these paths precisely *because* nothing happened, but `dispatched` was
+    # inferred from the raw entry count -- so an empty backlog read as work,
+    # the backoff reset to its floor, and the sleep (which lived inside
+    # `if not dispatched`) never ran at all. An idle fleet spun at full speed
+    # re-running preflight and a 50-candidate orchestrator fetch; halted_critical
+    # turned the org-wide stop signal into the tightest polling loop of the three.
+    ledger_path = tmp_path / "ledger.jsonl"
+    monkeypatch.setattr(fc, "DISPATCH_LEDGER", ledger_path)
+    ledger = fc.Ledger(ledger_path)
+    clock = _FakeClock()
+    monkeypatch.setattr(fc.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(fc.account_usage, "select_accounts", lambda pool, pct: _usable(pool))
+
+    sleeps: list[float] = []
+
+    def recording_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock.sleep(seconds)
+
+    monkeypatch.setattr(fc.time, "sleep", recording_sleep)
+
+    # Bounded by iteration count, not by the clock: with the bug there are no
+    # sleeps at all, so a clock-bounded loop would never advance and this would
+    # hang instead of failing. Stop after four passes and assert on the sleeps.
+    iterations = 0
+
+    def fake_run_cycle(*a: object, **k: object) -> int:
+        nonlocal iterations
+        iterations += 1
+        if iterations > 4:
+            raise _StopLoop
+        ledger.record(
+            tool="fleet_dispatch", kind="dispatch", outcome=idle_outcome, detail=""
+        )
+        return 0
+
+    monkeypatch.setattr(fc, "_run_cycle", fake_run_cycle)
+
+    with pytest.raises(_StopLoop):
+        fc._run_loop(_loop_ns(idle_backoff_min=1.0), "python3")
+
+    # Slept on every idle iteration, and doubled rather than sitting on the floor.
+    assert sleeps == [120.0, 240.0, 480.0, 960.0]
+
+
+def test_a_real_dispatch_resets_the_backoff_to_the_floor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    ledger_path = tmp_path / "ledger.jsonl"
+    monkeypatch.setattr(fc, "DISPATCH_LEDGER", ledger_path)
+    ledger = fc.Ledger(ledger_path)
+    clock = _FakeClock()
+    monkeypatch.setattr(fc.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(fc.account_usage, "select_accounts", lambda pool, pct: _usable(pool))
+
+    sleeps: list[float] = []
+
+    def recording_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock.sleep(seconds)
+
+    monkeypatch.setattr(fc.time, "sleep", recording_sleep)
+
+    iterations = 0
+
+    def fake_run_cycle(*a: object, **k: object) -> int:
+        nonlocal iterations
+        iterations += 1
+        if iterations > 3:
+            raise _StopLoop
+        ledger.record(tool="fleet_dispatch", kind="dispatch", outcome="started", detail="")
+        return 0
+
+    monkeypatch.setattr(fc, "_run_cycle", fake_run_cycle)
+
+    with pytest.raises(_StopLoop):
+        fc._run_loop(_loop_ns(idle_backoff_min=1.0), "python3")
+
+    # Work happened every pass, so every wait is the floor -- never the backoff.
+    assert sleeps == [60.0, 60.0, 60.0]
+
+
+def test_work_entry_count_ignores_the_idle_notes(tmp_path: Path) -> None:
+    ledger = fc.Ledger(tmp_path / "ledger.jsonl")
+    for outcome in ("backlog_empty", "no_dispatchable_candidates", "halted_critical"):
+        ledger.record(tool="fleet_dispatch", kind="dispatch", outcome=outcome, detail="")
+    ledger.record(tool="fleet_dispatch", kind="usage", outcome="success", detail="", cost_usd=1.0)
+    assert fc._work_entry_count(ledger) == 0
+
+    ledger.record(tool="fleet_dispatch", kind="dispatch", outcome="started", detail="")
+    ledger.record(tool="fleet_dispatch", kind="dispatch", outcome="success", detail="")
+    assert fc._work_entry_count(ledger) == 2
+
+
 def test_run_loop_stops_at_max_duration(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(fc, "DISPATCH_LEDGER", tmp_path / "ledger.jsonl")
     clock = _FakeClock()
@@ -591,6 +699,12 @@ def test_run_loop_stops_at_budget_cap(monkeypatch: pytest.MonkeyPatch, tmp_path:
     ledger_path = tmp_path / "ledger.jsonl"
     monkeypatch.setattr(fc, "DISPATCH_LEDGER", ledger_path)
     ledger = fc.Ledger(ledger_path)
+    # A `usage` entry is spend, not dispatched work, so these iterations are
+    # idle and now genuinely back off. This test used to finish only because
+    # any new ledger entry counted as a dispatch and skipped the sleep.
+    clock = _FakeClock()
+    monkeypatch.setattr(fc.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(fc.time, "sleep", clock.sleep)
 
     def fake_run_cycle(
         args: argparse.Namespace, *, accounts: str, skip_dispatch: bool, py: str

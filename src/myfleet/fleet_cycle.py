@@ -78,7 +78,12 @@ import myfleet.fleet_ask as fleet_ask
 import myfleet.heartbeat as heartbeat
 import myfleet.preflight as preflight
 from myfleet.cycle_driver import Stage, import_or_die, run_command
-from myfleet.fleet_dispatch import DISPATCH_LEDGER, HALT_MARKER, _critical_halt_issues
+from myfleet.fleet_dispatch import (
+    DISPATCH_LEDGER,
+    HALT_MARKER,
+    WORK_OUTCOMES,
+    _critical_halt_issues,
+)
 from myfleet.workspace import fleet_root
 
 build_waves = import_or_die("mypipeline.plan", "build_waves", "my-pipeline")
@@ -626,6 +631,22 @@ def _loop_should_stop(
     return None
 
 
+def _work_entry_count(ledger: Ledger) -> int:
+    """How many dispatch entries so far represent a worker actually taking an issue.
+
+    Not the raw entry count. fleet_dispatch records an entry on exactly the
+    paths where nothing happened too -- backlog_empty, no_dispatchable_
+    candidates, halted_critical -- so "the ledger grew" reads an idle pass as a
+    busy one, and the halted case turns a stop signal into the tightest possible
+    polling loop against the GitHub API (#105).
+    """
+    return sum(
+        1
+        for e in ledger.read(tool="fleet_dispatch", kind="dispatch")
+        if e.outcome in WORK_OUTCOMES
+    )
+
+
 def _next_backoff_s(
     current_backoff_s: float, *, dispatched: bool, idle_backoff_s: float, max_backoff_s: float
 ) -> float:
@@ -765,10 +786,10 @@ def _run_loop(args: argparse.Namespace, py: str) -> int:
                 + ")"
             )
 
-        entries_before = len(dispatch_ledger.read(tool="fleet_dispatch"))
+        work_before = _work_entry_count(dispatch_ledger)
         cycle_accounts = ",".join(usable_accounts) if usable_accounts else args.accounts
         _run_cycle(args, accounts=cycle_accounts, skip_dispatch=skip_dispatch, py=py)
-        dispatched = len(dispatch_ledger.read(tool="fleet_dispatch")) > entries_before
+        dispatched = _work_entry_count(dispatch_ledger) > work_before
 
         backoff_s = _next_backoff_s(
             backoff_s,
@@ -776,9 +797,15 @@ def _run_loop(args: argparse.Namespace, py: str) -> int:
             idle_backoff_s=idle_backoff_s,
             max_backoff_s=args.max_backoff_min * 60.0,
         )
-        if not dispatched:
+        # Always sleep, and _next_backoff_s already says how long: the floor
+        # after an iteration that did work, the doubled backoff after one that
+        # didn't. Sleeping only in the idle branch meant the idle case -- the
+        # one this backoff exists for -- was the case that spun.
+        if dispatched:
+            print(f"(dispatched this iteration — next pass in {backoff_s:.0f}s)")
+        else:
             print(f"(nothing dispatched this iteration — backing off {backoff_s:.0f}s)")
-            time.sleep(backoff_s)
+        time.sleep(backoff_s)
 
 
 def main(argv: list[str] | None = None) -> int:
