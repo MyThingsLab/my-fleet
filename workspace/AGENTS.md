@@ -111,6 +111,10 @@ about what a core bug is worth lives in one place.
   from an earlier session or worker doesn't satisfy this. Fresh worker
   sessions and post-compaction context both need a fresh Read before any
   Edit/Write, even for files you already know the contents of.
+- **Follow Unified Schemas for commits, issues, and PRs.**
+  - Commits: `<type>(<scope>): <short imperative summary>` (max 72 chars, lowercase).
+  - Issues: Title `<repo/area>: <imperative summary>`, assign all 5 CAD facets, standard body sections.
+  - PRs: Title `<type>(<scope>): <short imperative summary>`, include `Closes #<issue>`, verification logs, safety checklist; open as draft first.
 
 ## Verifying, and what does not count as verification
 
