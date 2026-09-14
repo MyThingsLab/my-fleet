@@ -130,10 +130,10 @@ def test_main_dispatches_accounts_concurrently(tmp_path: Path, monkeypatch) -> N
 
     candidates = [
         fd.Candidate(
-            id="repo#1", repo="repo", tool="", title="t1", kind="issue", created_at="2020-01-01"
+            id="repoA#1", repo="repoA", tool="", title="t1", kind="issue", created_at="2020-01-01"
         ),
         fd.Candidate(
-            id="repo#2", repo="repo", tool="", title="t2", kind="issue", created_at="2020-01-02"
+            id="repoB#2", repo="repoB", tool="", title="t2", kind="issue", created_at="2020-01-02"
         ),
     ]
 
@@ -187,10 +187,10 @@ def test_main_surfaces_every_account_failure_not_just_first(
 
     candidates = [
         fd.Candidate(
-            id="repo#1", repo="repo", tool="", title="t1", kind="issue", created_at="2020-01-01"
+            id="repoA#1", repo="repoA", tool="", title="t1", kind="issue", created_at="2020-01-01"
         ),
         fd.Candidate(
-            id="repo#2", repo="repo", tool="", title="t2", kind="issue", created_at="2020-01-02"
+            id="repoB#2", repo="repoB", tool="", title="t2", kind="issue", created_at="2020-01-02"
         ),
     ]
 
@@ -2136,5 +2136,91 @@ def test_main_preserves_orchestrator_priority_order_over_lane(
     rc = fd.main(["--accounts", str(tmp_path / "a")])
 
     assert rc == 0
-    assert dispatched == ["my-dashboard#5"]
+    assert dispatched[0] == "my-dashboard#5"
+
+
+def test_pull_queue_fast_worker_pulls_multiple_candidates(tmp_path: Path, monkeypatch) -> None:
+    dispatched: list[tuple[str, str]] = []
+    dispatched_lock = threading.Lock()
+
+    def fake_dispatch_one(account, candidate, **_kwargs):
+        with dispatched_lock:
+            dispatched.append((account.name, candidate.id))
+
+    monkeypatch.setattr(fd, "_dispatch_one", fake_dispatch_one)
+    monkeypatch.setattr(fd, "_last_attempt", lambda *a, **k: None)
+
+    candidates = [
+        fd.Candidate(id="repoA#1", repo="repoA", tool="", title="t1", kind="issue", created_at="2026-09-13T20:00:00Z"),
+        fd.Candidate(id="repoB#2", repo="repoB", tool="", title="t2", kind="issue", created_at="2026-09-13T20:00:01Z"),
+        fd.Candidate(id="repoC#3", repo="repoC", tool="", title="t3", kind="issue", created_at="2026-09-13T20:00:02Z"),
+    ]
+
+    class FakeRecommendation:
+        def __init__(self, chosen: fd.Candidate) -> None:
+            self.chosen = chosen
+
+    class FakeOrchestrator:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def next_n(self, _n: int) -> list[FakeRecommendation]:
+            return [FakeRecommendation(c) for c in candidates]
+
+    monkeypatch.setattr(fd, "Orchestrator", FakeOrchestrator)
+    monkeypatch.setattr(fd, "_preflight_distinct_accounts", lambda accounts: [])
+    monkeypatch.setattr(fd, "_open_pr_number", lambda *a, **k: None)
+
+    rc = fd.main(["--accounts", str(tmp_path / "account1")])
+
+    assert rc == 0
+    # Single fast worker account pulled all 3 candidates from the queue
+    assert [cid for _, cid in dispatched] == ["repoA#1", "repoB#2", "repoC#3"]
+    assert [acc for acc, _ in dispatched] == ["account1", "account1", "account1"]
+
+
+def test_pull_queue_respects_repo_leases(tmp_path: Path, monkeypatch) -> None:
+    active_repos_seen: list[set[str]] = []
+    current_active: set[str] = set()
+    lock = threading.Lock()
+
+    def fake_dispatch_one(account, candidate, **_kwargs):
+        repo = candidate.repo
+        with lock:
+            assert repo not in current_active, f"Repo {repo} was leased concurrently!"
+            current_active.add(repo)
+            active_repos_seen.append(set(current_active))
+        time.sleep(0.1)
+        with lock:
+            current_active.remove(repo)
+
+    monkeypatch.setattr(fd, "_dispatch_one", fake_dispatch_one)
+    monkeypatch.setattr(fd, "_last_attempt", lambda *a, **k: None)
+
+    candidates = [
+        fd.Candidate(id="repoA#1", repo="repoA", tool="", title="t1", kind="issue", created_at="2026-09-13T20:00:00Z"),
+        fd.Candidate(id="repoA#2", repo="repoA", tool="", title="t2", kind="issue", created_at="2026-09-13T20:00:01Z"),
+    ]
+
+    class FakeRecommendation:
+        def __init__(self, chosen: fd.Candidate) -> None:
+            self.chosen = chosen
+
+    class FakeOrchestrator:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def next_n(self, _n: int) -> list[FakeRecommendation]:
+            return [FakeRecommendation(c) for c in candidates]
+
+    monkeypatch.setattr(fd, "Orchestrator", FakeOrchestrator)
+    monkeypatch.setattr(fd, "_preflight_distinct_accounts", lambda accounts: [])
+    monkeypatch.setattr(fd, "_open_pr_number", lambda *a, **k: None)
+
+    rc = fd.main(["--accounts", f"{tmp_path / 'acc1'},{tmp_path / 'acc2'}"])
+
+    assert rc == 0
+    # Both repoA#1 and repoA#2 ran sequentially because repoA was leased
+    assert len(active_repos_seen) == 2
+
 
