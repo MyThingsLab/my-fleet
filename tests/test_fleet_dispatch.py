@@ -2224,3 +2224,36 @@ def test_pull_queue_respects_repo_leases(tmp_path: Path, monkeypatch) -> None:
     assert len(active_repos_seen) == 2
 
 
+
+
+def test_ensure_repo_graph_rebuilds_when_the_extractor_version_moved(tmp_path: Path) -> None:
+    # A matching commit SHA is not enough: the repo can be unchanged while the
+    # extractor has moved on. Reusing a cache in the old edge format is worse
+    # than having none -- the traversal discards what it cannot parse, and the
+    # Agent Context Pack then reports no callers and no tests.
+    import sqlite3
+
+    from mythings.graph import CodebaseGraph
+
+    repo_path = tmp_path / "my-tool"
+    repo_path.mkdir()
+    _init_git_repo(repo_path)
+    (repo_path / "worker.py").write_text("def do_work() -> int:\n    return 42\n")
+    subprocess.run(["git", "-C", str(repo_path), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo_path), "commit", "-qm", "add code"], check=True)
+
+    db_path = fd._ensure_repo_graph(repo_path)
+    assert db_path is not None
+
+    # Same commit, cache written by a different extractor version.
+    stale = sqlite3.connect(str(db_path))
+    stale.execute("DELETE FROM nodes")
+    stale.execute("PRAGMA user_version = 0")
+    stale.commit()
+    stale.close()
+
+    rebuilt = fd._ensure_repo_graph(repo_path)
+    assert rebuilt is not None
+    graph = CodebaseGraph(rebuilt)
+    assert len(graph.find_symbols("do_work")) == 1
+    graph.close()
