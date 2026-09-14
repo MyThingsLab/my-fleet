@@ -2,3 +2,4 @@
 {"data":{"session":"2026-09-14"},"detail":"Replace paths-ignore with step skipping in my-fleet CI workflow","kind":"decision","outcome":"success","tool":"claude-code","ts":"2026-09-13T22:07:59Z"}
 {"data":{"session":"2026-09-14"},"detail":"dispatch: replace the zip-batch with a pull queue","kind":"feature","outcome":"success","tool":"claude-code","ts":"2026-09-14T13:13:50Z"}
 {"data":{"session":"2026-09-14"},"detail":"feat(accept): wire accept.py settlement into fleet_cycle and fix gh pr view baseRefName","kind":"feature","outcome":"success","tool":"claude-code","ts":"2026-09-14T13:35:02Z"}
+{"data":{"session":"2026-09-14"},"detail":"feat(dispatch): route candidate budget and turns from size/kind labels","kind":"feature","outcome":"success","tool":"claude-code","ts":"2026-09-14T13:50:15Z"}

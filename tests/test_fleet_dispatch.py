@@ -2224,8 +2224,6 @@ def test_pull_queue_respects_repo_leases(tmp_path: Path, monkeypatch) -> None:
     assert len(active_repos_seen) == 2
 
 
-
-
 def test_ensure_repo_graph_rebuilds_when_the_extractor_version_moved(tmp_path: Path) -> None:
     # A matching commit SHA is not enough: the repo can be unchanged while the
     # extractor has moved on. Reusing a cache in the old edge format is worse
@@ -2257,3 +2255,29 @@ def test_ensure_repo_graph_rebuilds_when_the_extractor_version_moved(tmp_path: P
     graph = CodebaseGraph(rebuilt)
     assert len(graph.find_symbols("do_work")) == 1
     graph.close()
+
+
+def test_route_candidate_params() -> None:
+    # Mechanical small task: size:S + kind:chore -> budget 1.0, turns 20
+    cand_small = fd.Candidate(
+        id="repoA#1", repo="repoA", tool="", title="t1", kind="issue", created_at="2026-09-13T20:00:00Z",
+        labels=("size:S", "kind:chore")
+    )
+    provider, budget, turns = fd.route_candidate_params(cand_small)
+    assert provider == "claude"
+    assert budget == 1.0
+    assert turns == 20
+
+    # Complex / non-small task: size:M + kind:feat -> default budget 3.0, turns 40
+    cand_large = fd.Candidate(
+        id="repoA#2", repo="repoA", tool="", title="t2", kind="issue", created_at="2026-09-13T20:00:00Z",
+        labels=("size:M", "kind:feat")
+    )
+    provider, budget, turns = fd.route_candidate_params(cand_large)
+    assert budget == 3.0
+    assert turns == 40
+
+    # When route=False: returns defaults
+    provider, budget, turns = fd.route_candidate_params(cand_small, route=False)
+    assert budget == 3.0
+    assert turns == 40
