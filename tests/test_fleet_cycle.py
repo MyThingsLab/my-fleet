@@ -117,6 +117,9 @@ def test_main_execute_runs_mydashboard_render_after_mydocs(
 ) -> None:
     calls = _capture_runs(monkeypatch)
     monkeypatch.setattr(fc, "WORKSPACE_ROOT", tmp_path)
+    # This test is about stage order, so both of the docs stage's real-world
+    # preconditions are stubbed present: the clone, and the `mydocs` binary.
+    monkeypatch.setattr(fc.shutil, "which", lambda name: f"/usr/bin/{name}")
     docs_site_root = tmp_path / fc.DOCS_SITE_CLONE
     docs_site_root.mkdir()
     fc.main(["--accounts", "/tmp/acct", "--skip-dispatch", "--execute", "--brief-count", "0"])
@@ -836,8 +839,9 @@ def test_main_loop_flag_dispatches_to_run_loop(monkeypatch: pytest.MonkeyPatch) 
 def test_main_concurrency_flag_passed(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
-    def fake_run_cycle(args: argparse.Namespace, **kw: object) -> None:
+    def fake_run_cycle(args: argparse.Namespace, **kw: object) -> int:
         captured["concurrency"] = args.concurrency
+        return 0
 
     monkeypatch.setattr(fc, "_run_cycle", fake_run_cycle)
     rc = fc.main(["--accounts", "/tmp/acct", "-j", "4"])
@@ -852,9 +856,10 @@ def test_execute_wave_sequential(capsys: pytest.CaptureFixture[str]) -> None:
         fc.Stage("stage-2", ["echo", "2"], mutating=False),
     ]
 
-    def fake_execute_stage(stage: fc.Stage, *, execute: bool) -> None:
+    def fake_execute_stage(stage: fc.Stage, *, execute: bool) -> int:
         calls.append(stage.name)
         print(f"ran {stage.name}")
+        return 0
 
     original_execute_stage = fc._execute_stage
     try:
@@ -875,8 +880,9 @@ def test_execute_wave_concurrent(capsys: pytest.CaptureFixture[str]) -> None:
         fc.Stage("tool-b", ["cmd-b"], mutating=False),
     ]
 
-    def fake_execute_stage(stage: fc.Stage, *, execute: bool) -> None:
+    def fake_execute_stage(stage: fc.Stage, *, execute: bool) -> int:
         print(f"output from {stage.name}")
+        return 0
 
     original_execute_stage = fc._execute_stage
     try:
@@ -892,6 +898,118 @@ def test_execute_wave_concurrent(capsys: pytest.CaptureFixture[str]) -> None:
     assert "output from tool-b" in out
 
 
+# ---- stage exit codes reach the cycle's outcome (#101) ----------------------
+
+
+def _failing_stage_cycle(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, failing_tool: str, concurrency: int
+) -> tuple[int, list]:
+    def fake_run(cmd: list[str], *, check: bool = False, env: dict | None = None) -> int:
+        return 3 if cmd[0] == failing_tool else 0
+
+    ledger_path = tmp_path / "ledger.jsonl"
+    monkeypatch.setattr(fc, "_run", fake_run)
+    monkeypatch.setattr(fc, "DISPATCH_LEDGER", ledger_path)
+    monkeypatch.setattr(fc, "WORKSPACE_ROOT", tmp_path)
+    argv = ["--accounts", "/tmp/acct", "--skip-dispatch", "--execute", "--brief-count", "0"]
+    rc = fc.main([*argv, "-j", str(concurrency)])
+    return rc, fc.Ledger(ledger_path).read(tool="fleet_cycle", kind="cycle")
+
+
+@pytest.mark.parametrize("concurrency", [1, 4])
+def test_a_failing_stage_makes_the_cycle_report_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, concurrency: int
+) -> None:
+    # Regression test for #101: every stage's exit code used to be discarded,
+    # so a stage could fail on every cycle for weeks and the ledger still read
+    # `ok`. Parametrized over both paths because they used to disagree -- the
+    # concurrent one swallowed exceptions, the serial one aborted the wave.
+    rc, entries = _failing_stage_cycle(
+        monkeypatch, tmp_path, failing_tool="myprojector", concurrency=concurrency
+    )
+
+    assert rc == 1
+    assert [e.outcome for e in entries] == ["stage_failed"]
+    assert entries[0].data.get("failed_stages") == ["myprojector"]
+    assert "rc=3" in entries[0].detail
+
+
+def test_a_clean_cycle_records_ok(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    rc, entries = _failing_stage_cycle(
+        monkeypatch, tmp_path, failing_tool="nothing-fails", concurrency=1
+    )
+
+    assert rc == 0
+    assert [e.outcome for e in entries] == ["ok"]
+
+
+def test_a_raising_stage_fails_the_cycle_without_aborting_later_stages(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The serial path had no `try`, so an exception unwound the whole wave and
+    # every later stage silently never ran. Both paths now treat a raise the
+    # same as a nonzero exit: one failed stage, the rest still run.
+    ran: list[str] = []
+
+    def fake_run(cmd: list[str], *, check: bool = False, env: dict | None = None) -> int:
+        if cmd[0] == "myprojector":
+            raise RuntimeError("boom")
+        ran.append(cmd[0])
+        return 0
+
+    ledger_path = tmp_path / "ledger.jsonl"
+    monkeypatch.setattr(fc, "_run", fake_run)
+    monkeypatch.setattr(fc, "DISPATCH_LEDGER", ledger_path)
+    monkeypatch.setattr(fc, "WORKSPACE_ROOT", tmp_path)
+
+    rc = fc.main(
+        ["--accounts", "/tmp/acct", "--skip-dispatch", "--execute", "--brief-count", "0"]
+    )
+
+    assert rc == 1
+    entries = fc.Ledger(ledger_path).read(tool="fleet_cycle", kind="cycle")
+    assert [e.outcome for e in entries] == ["stage_failed"]
+    # myreporter comes after myprojector in the graph; it still ran.
+    assert "myreporter" in ran
+
+
+def test_a_halted_cycle_is_recorded_as_halted_not_ok(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _capture_runs(monkeypatch)
+    ledger_path = tmp_path / "ledger.jsonl"
+    monkeypatch.setattr(fc, "DISPATCH_LEDGER", ledger_path)
+    marker = tmp_path / "HALT"
+    marker.write_text("halted\n")
+    monkeypatch.setattr(fc, "HALT_MARKER", marker)
+
+    rc = fc.main(["--accounts", "/tmp/acct", "--execute", "--skip-dispatch", "--brief-count", "0"])
+
+    assert rc == 0
+    entries = fc.Ledger(ledger_path).read(tool="fleet_cycle", kind="cycle")
+    assert [e.outcome for e in entries] == ["halted"]
+
+
+def test_docs_stage_skips_when_mydocs_is_not_installed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # my-docs is archived and `mydocs` isn't in the deployed venv, so with exit
+    # codes now honest this stage would turn every cycle red. A missing optional
+    # binary is an absence to skip on, not a failure.
+    monkeypatch.setattr(fc, "WORKSPACE_ROOT", tmp_path)
+    (tmp_path / fc.DOCS_SITE_CLONE).mkdir()
+    monkeypatch.setattr(fc.shutil, "which", lambda name: None)
+
+    ctx = fc._Ctx(
+        args=SimpleNamespace(engine="noop"), accounts="/tmp/acct", skip_dispatch=True, py="python3"
+    )
+    stages = fc._stage_docs(ctx)
+
+    assert len(stages) == 1
+    assert stages[0].skip is not None
+    assert "not installed" in stages[0].skip
+
+
 def test_stage_dispatch_passes_provider() -> None:
     args = _loop_ns(provider="gemini", dispatch_execute=False, allow_personal_token=False, app_id=None, app_installation_id=None, app_private_key=None)
     ctx = fc._Ctx(args=args, accounts="/tmp/acct", skip_dispatch=False, py="python3")
@@ -905,8 +1023,9 @@ def test_stage_dispatch_passes_provider() -> None:
 def test_main_provider_flag_passed(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
-    def fake_run_cycle(args: argparse.Namespace, **kw: object) -> None:
+    def fake_run_cycle(args: argparse.Namespace, **kw: object) -> int:
         captured["provider"] = args.provider
+        return 0
 
     monkeypatch.setattr(fc, "_run_cycle", fake_run_cycle)
     rc = fc.main(["--accounts", "/tmp/acct", "--provider", "gemini"])
