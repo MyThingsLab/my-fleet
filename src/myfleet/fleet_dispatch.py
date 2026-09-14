@@ -531,6 +531,7 @@ class Attempt:
     attempt_number: int  # count of terminal attempts so far, this one included
     final_message: str = ""
     blocker: str | None = None  # "<org>/<repo>#<n>" when outcome == "blocked"
+    has_human_retry: bool = False
 
 
 def _last_attempt(ledger: Ledger, candidate_id: str) -> Attempt | None:
@@ -556,6 +557,20 @@ def _last_attempt(ledger: Ledger, candidate_id: str) -> Attempt | None:
         if e.outcome in _COUNTED_OUTCOMES
         and not (e.outcome == "failed" and _is_transient_failure(e.data.get("final_message", "")))
     )
+
+    decisions = [
+        e
+        for e in ledger
+        if e.tool == "mytelegrambot"
+        and e.kind == "blocker_decision"
+        and e.data.get("candidate") == candidate_id
+    ]
+    has_human_retry = False
+    if decisions:
+        last_decision = decisions[-1]
+        if last_decision.outcome == "retry" and last_decision.ts >= last.ts:
+            has_human_retry = True
+
     return Attempt(
         candidate_id=candidate_id,
         outcome=last.outcome,
@@ -563,6 +578,7 @@ def _last_attempt(ledger: Ledger, candidate_id: str) -> Attempt | None:
         attempt_number=counted,
         final_message=last.data.get("final_message", ""),
         blocker=last.data.get("blocker"),
+        has_human_retry=has_human_retry,
     )
 
 
@@ -579,6 +595,8 @@ def _dispatch_decision(
         # denied re-hits the same policy wall every time, and a skipped issue
         # (already closed elsewhere) has nothing left to do.
         return "skip:done"
+    if attempt.has_human_retry:
+        return "resume"
     if attempt.outcome == "needs_human":
         return "skip:needs_human"
     if attempt.outcome == "blocked":
