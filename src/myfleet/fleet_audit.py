@@ -105,10 +105,13 @@ def _index_repo(repo_path: Path) -> Any:
     """Index a single repo into an in-memory graph, returning the CodebaseGraph."""
     from mythings.graph import CodebaseGraph, MarkdownExtractor, PythonAstExtractor
 
-    # Check for a cached graph first
-    cached = repo_path / ".mythings" / "graph.sqlite"
-    if cached.exists():
-        return CodebaseGraph(cached)
+    # `open_cached` rejects a cache an older extractor wrote. Reusing one is
+    # worse than having none: the current traversal discards edges in a format
+    # it no longer understands, and the result reads as "this symbol has no
+    # callers and no tests" rather than as a stale cache.
+    cached = CodebaseGraph.open_cached(repo_path / ".mythings" / "graph.sqlite")
+    if cached is not None:
+        return cached
 
     graph = CodebaseGraph.in_memory()
     PythonAstExtractor(repo_root=repo_path).index_repo(graph)

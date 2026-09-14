@@ -675,11 +675,19 @@ def _ensure_repo_graph(repo_path: Path) -> Path | None:
     db_path = cache_dir / "graph.sqlite"
     meta_path = cache_dir / "graph.meta.json"
 
-    if db_path.exists() and meta_path.exists():
+    # A matching commit SHA is necessary but not sufficient: the repo can be
+    # unchanged while the *extractor* has moved on, and a cache in the old edge
+    # format is worse than no cache at all -- the current traversal discards
+    # what it cannot parse, so the Agent Context Pack reports no callers and no
+    # tests, which reads as a real answer rather than as a stale index.
+    if meta_path.exists():
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
             if meta.get("commit_sha") == head_sha:
-                return db_path
+                cached = CodebaseGraph.open_cached(db_path)
+                if cached is not None:
+                    cached.close()
+                    return db_path
         except Exception:
             pass
 
