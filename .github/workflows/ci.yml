@@ -23,6 +23,15 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+        with:
+          # Neither `pull_request.base.sha` nor `event.before` exists in a
+          # shallow clone, and the diff below is what decides whether this job
+          # tests anything at all. Without full history that diff failed on
+          # every run, and the `|| true` turned the failure into "nothing
+          # changed" -- Install, Ruff and Tests skipped while the job reported
+          # success. The required `test` check is the merge gate's only
+          # evidence, so it was green without running.
+          fetch-depth: 0
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -39,7 +48,16 @@ jobs:
             fi
             HEAD="HEAD"
           fi
-          CHANGED=$(git diff --name-only "$BASE" "$HEAD" | grep -vE '(\.md$|^docs/|^dev-ledger/)' || true)
+          # Fail closed. A base SHA can still be unreachable after a
+          # force-push or a GC, and "I could not tell what changed" must mean
+          # "run everything", never "skip everything" -- the cheap answer and
+          # the unsafe answer are the same one here.
+          if ! DIFF=$(git diff --name-only "$BASE" "$HEAD" 2>&1); then
+            echo "code_changed=true" >> "$GITHUB_OUTPUT"
+            echo "Could not diff $BASE..$HEAD; running the full job. ($DIFF)"
+            exit 0
+          fi
+          CHANGED=$(printf '%s\n' "$DIFF" | grep -vE '(\.md$|^docs/|^dev-ledger/)' || true)
           if [ -n "$CHANGED" ]; then
             echo "code_changed=true" >> "$GITHUB_OUTPUT"
           else

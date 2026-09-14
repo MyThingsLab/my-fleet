@@ -56,6 +56,7 @@ import json
 import re
 import subprocess
 import sys
+import time
 import tomllib
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -433,13 +434,17 @@ def settle(
     if ask_human:
         try:
             from myguard import Guard
-            from mythings.policy import Action, Decision
             from myguard.rules import MERGE_ACTION
+            from mythings.policy import Action, Decision
+
             guard = Guard()
         except ImportError:
             guard = None
 
-    for repo, number, title, is_draft in open_prs:
+    # The listing's draft flag is deliberately unused: `assess` re-reads it from
+    # the API per PR, and a flag captured when the org listing was taken can be
+    # stale by the time this loop reaches that PR.
+    for repo, number, title, _is_draft in open_prs:
         if repo_filter and repo not in repo_filter:
             continue
         assessment = assess(repo, number)
@@ -486,8 +491,9 @@ def settle(
         elif verdict is Verdict.NEEDS_HUMAN:
             approved = False
             if ask_human and guard is not None:
-                from mythings.policy import Action, Decision
-                from myguard.rules import MERGE_ACTION
+                # `Action`, `Decision` and `MERGE_ACTION` come from the import
+                # above: a non-None `guard` is exactly the evidence that it
+                # succeeded, and they share this function's scope.
                 action = Action(
                     kind=MERGE_ACTION,
                     payload={"repo": f"{ORG}/{repo}", "number": number, "title": title},
@@ -608,6 +614,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.settle:
         from mythings.ledger import Ledger
+
         from myfleet.fleet_dispatch import DISPATCH_LEDGER
         ledger = Ledger(DISPATCH_LEDGER)
         assessments = settle(
