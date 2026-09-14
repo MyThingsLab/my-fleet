@@ -323,12 +323,13 @@ def main(argv: list[str] | None = None) -> int:
                 timeout=args.ask_timeout,
                 remote_daemon=args.ask_remote_daemon,
             )
+            print(f"\nasking over Telegram -> {wiring['MYTHINGS_ASK_CMD']}\n")
+            # Built *after* the env is armed, so it picks the channel up.
+            return merge_by_asking(ready, Guard(), budget_s=args.ask_budget_min * 60)
         except fleet_ask.AskChannelUnavailable as exc:
             print(f"\ncannot ask: {exc}", file=sys.stderr)
             return 2
-        print(f"\nasking over Telegram -> {wiring['MYTHINGS_ASK_CMD']}\n")
-        # Built *after* the env is armed, so it picks the channel up.
-        return merge_by_asking(ready, Guard(), budget_s=args.ask_budget_min * 60)
+
 
     if not args.execute:
         print(
