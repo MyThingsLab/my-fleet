@@ -39,6 +39,7 @@ recorded as a "deferred" outcome -- resumable, not counted toward MAX_ATTEMPTS.
 from __future__ import annotations
 
 import argparse
+import collections
 import json
 import os
 import subprocess
@@ -1320,45 +1321,19 @@ def main(argv: list[str] | None = None) -> int:
             continue
         plan.append((c, prior if decision == "resume" else None))
 
-    pairs = list(
-        zip(accounts, plan, strict=False)
-    )  # deliberately truncates to the shorter of the two
-
-    # Enforced before spend, not after: sum today's actual usage-ledger cost
-    # plus the worst case for every session this run is about to launch, and
-    # refuse the whole run if that would cross the daily ceiling. A dry run
-    # spends nothing, so it's exempt.
-    if args.execute and pairs:
+    # Enforced before spend: verify initial budget headroom before launching sessions.
+    if args.execute and plan:
         effective_cap = _effective_daily_cap(args.max_daily_usd)
         spent_today = _today_spend_usd(dispatch_ledger)
-        projected = spent_today + len(pairs) * args.max_budget_usd
-        if projected > effective_cap:
+        if spent_today + args.max_budget_usd > effective_cap:
             print(
                 f"refusing to launch: today's fleet_dispatch spend is already "
-                f"${spent_today:.2f}, and {len(pairs)} more session(s) at up to "
-                f"${args.max_budget_usd:.2f} each could reach ${projected:.2f}, "
-                f"over the ${effective_cap:.2f}/day cap (--max-daily-usd, "
-                f"or a --raise-daily-cap override). Raise --max-daily-usd, lower "
-                f"--max-budget-usd, or wait for the UTC day to roll over."
+                f"${spent_today:.2f}, and launching a session at up to "
+                f"${args.max_budget_usd:.2f} would cross the ${effective_cap:.2f}/day cap "
+                f"(--max-daily-usd). Raise --max-daily-usd, lower --max-budget-usd, "
+                f"or wait for the UTC day to roll over."
             )
             return 1
-        # A supervised loop should learn it's approaching the cap while it is
-        # still spending, not from tomorrow's digest or when the refusal above
-        # finally trips -- see fleet-dispatch#41. Once per day is deliberate:
-        # --loop re-evaluates this every iteration, and a crossed threshold
-        # stays crossed.
-        if projected >= args.spend_alert_fraction * effective_cap and not _spend_alert_sent_today(
-            dispatch_ledger
-        ):
-            raise_to = round(effective_cap * 1.5, 2)
-            sent = fleet_ask.alert_spend(spent=spent_today, cap=effective_cap, raise_to=raise_to)
-            dispatch_ledger.record(
-                tool="fleet_dispatch",
-                kind="spend_alert",
-                outcome="success" if sent else "failure",
-                detail=f"spend alert: ${spent_today:.2f}/${effective_cap:.2f} "
-                f"({args.spend_alert_fraction:.0%} threshold)",
-            )
 
     if args.execute:
         stale = _cleanup_stale_leases(max_age_s=args.session_timeout_s + 600)
@@ -1366,17 +1341,56 @@ def main(argv: list[str] | None = None) -> int:
             print(f"cleaned up {stale} stale worker lease(s) from previous runs")
 
     failures: list[tuple[Account, Candidate, BaseException]] = []
-    if pairs:
-        if args.execute:
-            for account, (candidate, _) in pairs:
-                _register_worker(account.name, candidate.id, candidate.id.split("#")[0])
-        # One worker thread per account: each `mycoder build` invocation gets
-        # its own Workspace worktree (mythings.isolation.Workspace, inside
-        # my-coder) under its own config dir, so nothing about running
-        # them at the same time needs new isolation.
-        with ThreadPoolExecutor(max_workers=len(pairs)) as pool:
-            futures = {}
-            for account, (candidate, prior) in pairs:
+    dispatched_candidates: list[Candidate] = []
+
+    if plan and accounts:
+        queue = collections.deque(plan)
+        queue_lock = threading.Lock()
+        active_repos: set[str] = set()
+
+        def _worker_loop(account: Account) -> None:
+            while True:
+                item: tuple[Candidate, Attempt | None] | None = None
+                with queue_lock:
+                    if args.execute:
+                        effective_cap = _effective_daily_cap(args.max_daily_usd)
+                        spent_today = _today_spend_usd(dispatch_ledger)
+                        projected = spent_today + args.max_budget_usd
+                        if projected > effective_cap:
+                            print(
+                                f"  [{account.name}] stopping pull: daily spend cap reached "
+                                f"(${spent_today:.2f} + ${args.max_budget_usd:.2f} > ${effective_cap:.2f})"
+                            )
+                            break
+                        if projected >= args.spend_alert_fraction * effective_cap and not _spend_alert_sent_today(
+                            dispatch_ledger
+                        ):
+                            raise_to = round(effective_cap * 1.5, 2)
+                            sent = fleet_ask.alert_spend(
+                                spent=spent_today, cap=effective_cap, raise_to=raise_to
+                            )
+                            dispatch_ledger.record(
+                                tool="fleet_dispatch",
+                                kind="spend_alert",
+                                outcome="success" if sent else "failure",
+                                detail=f"spend alert: ${spent_today:.2f}/${effective_cap:.2f} "
+                                f"({args.spend_alert_fraction:.0%} threshold)",
+                            )
+
+                    for idx, candidate_pair in enumerate(queue):
+                        cand, _ = candidate_pair
+                        repo_name = cand.id.split("#")[0]
+                        if repo_name not in active_repos:
+                            active_repos.add(repo_name)
+                            item = candidate_pair
+                            del queue[idx]
+                            break
+
+                if item is None:
+                    break
+
+                candidate, prior = item
+                repo_name = candidate.id.split("#")[0]
                 call_kw: dict[str, object] = dict(
                     execute=args.execute,
                     max_budget_usd=args.max_budget_usd,
@@ -1389,23 +1403,28 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 if args.provider != "claude":
                     call_kw["provider"] = args.provider
-                futures[pool.submit(_dispatch_one, account, candidate, **call_kw)] = (
-                    account,
-                    candidate,
-                )
-            # future.exception() blocks until that future is done but, unlike
-            # future.result(), never raises -- so one account's crash can't
-            # stop us from also collecting every other account's outcome.
-            for future, (account, candidate) in futures.items():
-                exc = future.exception()
-                if exc is not None:
-                    failures.append((account, candidate, exc))
+                try:
+                    with queue_lock:
+                        dispatched_candidates.append(candidate)
+                    _dispatch_one(account, candidate, **call_kw)
+                except BaseException as exc:
+                    with queue_lock:
+                        failures.append((account, candidate, exc))
+                    break
+                finally:
+                    with queue_lock:
+                        active_repos.remove(repo_name)
+
+        num_workers = min(len(accounts), len(plan))
+        with ThreadPoolExecutor(max_workers=num_workers) as pool:
+            futures = [pool.submit(_worker_loop, acc) for acc in accounts[:num_workers]]
+            for f in futures:
+                f.result()
+
     for account, candidate, exc in failures:
         print(f"  [{account.name}] {candidate.id} crashed: {exc!r}")
-    for account in accounts[len(plan) :]:
-        print(f"\n=== {account.name}: no ready issue candidate ===")
 
-    if not pairs:
+    if not dispatched_candidates:
         if candidates_pool:
             dispatch_ledger.record(
                 tool="fleet_dispatch",
