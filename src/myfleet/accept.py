@@ -611,6 +611,7 @@ def main(argv: list[str] | None = None) -> int:
         from mythings.ledger import Ledger
 
         from myfleet.fleet_dispatch import DISPATCH_LEDGER
+
         ledger = Ledger(DISPATCH_LEDGER)
         assessments = settle(
             execute=args.execute,
