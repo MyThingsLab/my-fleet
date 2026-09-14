@@ -56,6 +56,7 @@ import json
 import re
 import subprocess
 import sys
+import time
 import tomllib
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -433,13 +434,13 @@ def settle(
     if ask_human:
         try:
             from myguard import Guard
-            from mythings.policy import Action, Decision
             from myguard.rules import MERGE_ACTION
+            from mythings.policy import Action, Decision
             guard = Guard()
         except ImportError:
             guard = None
 
-    for repo, number, title, is_draft in open_prs:
+    for repo, number, title, _is_draft in open_prs:
         if repo_filter and repo not in repo_filter:
             continue
         assessment = assess(repo, number)
@@ -486,8 +487,8 @@ def settle(
         elif verdict is Verdict.NEEDS_HUMAN:
             approved = False
             if ask_human and guard is not None:
-                from mythings.policy import Action, Decision
                 from myguard.rules import MERGE_ACTION
+                from mythings.policy import Action, Decision
                 action = Action(
                     kind=MERGE_ACTION,
                     payload={"repo": f"{ORG}/{repo}", "number": number, "title": title},
@@ -608,6 +609,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.settle:
         from mythings.ledger import Ledger
+
         from myfleet.fleet_dispatch import DISPATCH_LEDGER
         ledger = Ledger(DISPATCH_LEDGER)
         assessments = settle(
