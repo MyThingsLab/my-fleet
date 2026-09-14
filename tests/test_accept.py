@@ -407,7 +407,7 @@ class TestNewDependency:
             "state": "OPEN",
             "mergeable": "MERGEABLE",
             "mergeStateStatus": "CLEAN",
-            "baseRefOid": "base",
+            "baseRefName": "base",
             "headRefOid": "head",
         }
         contents = {
@@ -469,3 +469,29 @@ class TestNewDependency:
         # never touches dependencies is not made unevaluable by this check.
         assert found.verdict is Verdict.ACCEPTED
         assert [c.passed for c in found.checks if c.name == "no_new_dependency"] == [True]
+
+
+class TestSettle:
+    def test_settle_evaluates_open_prs_and_records_ledger(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from myfleet.accept import settle
+
+        prs = [("my-fleet", 10, "feat: thing", False)]
+        monkeypatch.setattr("myfleet.accept.list_open_prs_in_org", lambda org: prs)
+
+        assess_mock = _assessment(Check("not_draft", True, "ready"))
+        monkeypatch.setattr("myfleet.accept.assess", lambda repo, num: assess_mock)
+
+        class FakeLedger:
+            def __init__(self):
+                self.records = []
+
+            def record(self, **kwargs):
+                self.records.append(kwargs)
+
+        ledger = FakeLedger()
+        assessments = settle(execute=False, ledger=ledger)
+        assert len(assessments) == 1
+        assert assessments[0].verdict is Verdict.ACCEPTED
+        assert len(ledger.records) == 1
+        assert ledger.records[0]["outcome"] == "accepted"
+

@@ -269,7 +269,7 @@ def assess(repo: str, number: int) -> Assessment:
             "--repo",
             f"{ORG}/{repo}",
             "--json",
-            "isDraft,body,mergeable,mergeStateStatus,state,baseRefOid,headRefOid",
+            "isDraft,body,mergeable,mergeStateStatus,state,baseRefName,headRefOid",
         ]
     )
     if code != 0:
@@ -331,7 +331,7 @@ def assess(repo: str, number: int) -> Assessment:
     if not manifests:
         found.checks.append(Check("no_new_dependency", True, "no pyproject.toml in the diff"))
     else:
-        added = new_dependencies(repo, manifests, pr["baseRefOid"], pr["headRefOid"])
+        added = new_dependencies(repo, manifests, pr["baseRefName"], pr["headRefOid"])
         if added is None:
             found.checks.append(
                 Check("no_new_dependency", None, "could not read a changed pyproject.toml")
@@ -381,6 +381,182 @@ def assess(repo: str, number: int) -> Assessment:
     return found
 
 
+def merge_pr(repo: str, number: int, *, retries: int = 4) -> None:
+    for attempt in range(retries):
+        code, _, err = _gh(
+            [
+                "pr",
+                "merge",
+                str(number),
+                "--repo",
+                f"{ORG}/{repo}",
+                "--squash",
+                "--delete-branch",
+            ]
+        )
+        if code == 0:
+            return
+        if any(t in err for t in ("Base branch was modified", "not mergeable", "not up to date")) and attempt < retries - 1:
+            time.sleep(10)
+            continue
+        raise RuntimeError(f"gh pr merge {repo}#{number} failed: {err.strip()}")
+
+
+def list_open_prs_in_org(org: str = ORG) -> list[tuple[str, int, str, bool]]:
+    code, out, _ = _gh(
+        ["search", "prs", "--owner", org, "--state", "open", "--limit", "200", "--json", "number,title,repository,isDraft"]
+    )
+    if code != 0:
+        return []
+    items = json.loads(out)
+    res = []
+    for item in items:
+        repo_name = item.get("repository", {}).get("name")
+        number = item.get("number")
+        title = item.get("title", "")
+        is_draft = item.get("isDraft", False)
+        if repo_name and number:
+            res.append((repo_name, number, title, is_draft))
+    return res
+
+
+def settle(
+    *,
+    execute: bool = False,
+    ask_human: bool = False,
+    ledger: object | None = None,
+    repo_filter: list[str] | None = None,
+) -> list[Assessment]:
+    open_prs = list_open_prs_in_org(ORG)
+    assessments: list[Assessment] = []
+    guard = None
+    if ask_human:
+        try:
+            from myguard import Guard
+            from mythings.policy import Action, Decision
+            from myguard.rules import MERGE_ACTION
+            guard = Guard()
+        except ImportError:
+            guard = None
+
+    for repo, number, title, is_draft in open_prs:
+        if repo_filter and repo not in repo_filter:
+            continue
+        assessment = assess(repo, number)
+        assessments.append(assessment)
+        verdict = assessment.verdict
+        failing_checks = [c.name for c in assessment.checks if c.passed is not True]
+
+        if verdict is Verdict.ACCEPTED:
+            if execute:
+                try:
+                    merge_pr(repo, number)
+                    print(f"ACCEPTED & MERGED: {repo}#{number} {title!r}")
+                    if ledger and hasattr(ledger, "record"):
+                        ledger.record(
+                            tool="fleet_accept",
+                            kind="accept",
+                            outcome="merged",
+                            repo=repo,
+                            pr=number,
+                            detail=assessment.reason,
+                        )
+                except Exception as exc:
+                    print(f"ACCEPTED but merge FAILED: {repo}#{number}: {exc}", file=sys.stderr)
+                    if ledger and hasattr(ledger, "record"):
+                        ledger.record(
+                            tool="fleet_accept",
+                            kind="accept",
+                            outcome="merge_failed",
+                            repo=repo,
+                            pr=number,
+                            detail=str(exc),
+                        )
+            else:
+                print(f"ACCEPTED (dry run): {repo}#{number} {title!r}")
+                if ledger and hasattr(ledger, "record"):
+                    ledger.record(
+                        tool="fleet_accept",
+                        kind="accept",
+                        outcome="accepted",
+                        repo=repo,
+                        pr=number,
+                        detail=assessment.reason,
+                    )
+        elif verdict is Verdict.NEEDS_HUMAN:
+            approved = False
+            if ask_human and guard is not None:
+                from mythings.policy import Action, Decision
+                from myguard.rules import MERGE_ACTION
+                action = Action(
+                    kind=MERGE_ACTION,
+                    payload={"repo": f"{ORG}/{repo}", "number": number, "title": title},
+                )
+                decision = guard.evaluate(action).under(unattended=True)
+                if decision is Decision.ALLOW:
+                    approved = True
+                    print(f"NEEDS_HUMAN -> APPROVED over Telegram: {repo}#{number} {title!r}")
+                    if execute:
+                        try:
+                            merge_pr(repo, number)
+                            print(f"MERGED via Telegram approval: {repo}#{number}")
+                            if ledger and hasattr(ledger, "record"):
+                                ledger.record(
+                                    tool="fleet_accept",
+                                    kind="accept",
+                                    outcome="human_approved_and_merged",
+                                    repo=repo,
+                                    pr=number,
+                                    detail=assessment.reason,
+                                )
+                        except Exception as exc:
+                            print(f"FAILED to merge after approval: {repo}#{number}: {exc}", file=sys.stderr)
+                            if ledger and hasattr(ledger, "record"):
+                                ledger.record(
+                                    tool="fleet_accept",
+                                    kind="accept",
+                                    outcome="merge_failed",
+                                    repo=repo,
+                                    pr=number,
+                                    detail=str(exc),
+                                )
+                    else:
+                        if ledger and hasattr(ledger, "record"):
+                            ledger.record(
+                                tool="fleet_accept",
+                                kind="accept",
+                                outcome="human_approved",
+                                repo=repo,
+                                pr=number,
+                                detail=assessment.reason,
+                            )
+            if not approved:
+                print(f"NEEDS_HUMAN: {repo}#{number} — {assessment.reason}")
+                if ledger and hasattr(ledger, "record"):
+                    ledger.record(
+                        tool="fleet_accept",
+                        kind="accept",
+                        outcome="needs_human",
+                        repo=repo,
+                        pr=number,
+                        detail=assessment.reason,
+                        failing_checks=failing_checks,
+                    )
+        else:
+            print(f"REJECTED: {repo}#{number} — {assessment.reason}")
+            if ledger and hasattr(ledger, "record"):
+                ledger.record(
+                    tool="fleet_accept",
+                    kind="accept",
+                    outcome="rejected",
+                    repo=repo,
+                    pr=number,
+                    detail=assessment.reason,
+                    failing_checks=failing_checks,
+                )
+    return assessments
+
+
 def report(assessments: list[Assessment], *, as_json: bool) -> None:
     if as_json:
         print(
@@ -414,18 +590,40 @@ def report(assessments: list[Assessment], *, as_json: bool) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--repo", required=True, help="repo name within the org")
+    parser.add_argument("--repo", action="append", help="repo name within the org (repeatable)")
     parser.add_argument(
-        "--pr", type=int, action="append", required=True, help="PR number (repeatable)"
+        "--pr", type=int, action="append", help="PR number (repeatable)"
     )
     parser.add_argument("--json", action="store_true", dest="as_json")
+    parser.add_argument(
+        "--settle", action="store_true", help="run settlement pass across org open PRs"
+    )
+    parser.add_argument(
+        "--execute", action="store_true", help="actually merge accepted PRs"
+    )
+    parser.add_argument(
+        "--ask-human", action="store_true", help="route needs_human PRs to Telegram ask channel"
+    )
     args = parser.parse_args(argv)
 
-    assessments = [assess(args.repo, n) for n in args.pr]
+    if args.settle:
+        from mythings.ledger import Ledger
+        from myfleet.fleet_dispatch import DISPATCH_LEDGER
+        ledger = Ledger(DISPATCH_LEDGER)
+        assessments = settle(
+            execute=args.execute,
+            ask_human=args.ask_human,
+            ledger=ledger,
+            repo_filter=args.repo,
+        )
+        return 0 if all(a.verdict is Verdict.ACCEPTED for a in assessments) else 1
+
+    if not args.repo or not args.pr:
+        parser.error("either --settle or both --repo and --pr are required")
+
+    repo_name = args.repo[0]
+    assessments = [assess(repo_name, n) for n in args.pr]
     report(assessments, as_json=args.as_json)
-    # Report-only by design: this module decides, it does not merge. Wiring a
-    # verdict to `gh pr merge` is a separate change, and by CARVE_OUTS it is one
-    # a human has to merge.
     return 0 if all(a.verdict is Verdict.ACCEPTED for a in assessments) else 1
 
 

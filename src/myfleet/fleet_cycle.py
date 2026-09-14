@@ -492,10 +492,21 @@ def _stage_red_main(ctx: _Ctx) -> list[Stage]:
     return [Stage("red-main", [ctx.py, "-m", "myfleet.red_main", "--execute"])]
 
 
+def _stage_accept(ctx: _Ctx) -> list[Stage]:
+    cmd = [ctx.py, "-m", "myfleet.accept", "--settle"]
+    if ctx.args.execute or ctx.args.dispatch_execute:
+        cmd.append("--execute")
+    if getattr(ctx.args, "ask_human", False):
+        cmd.append("--ask-human")
+    return [Stage("fleet-accept", cmd, mutating=False)]
+
+
 RESOLVERS: dict[str, Callable[[_Ctx], list[Stage]]] = {
     "red-main": _stage_red_main,
     "myplanner": _stage_planner,
     "fleet-dispatch": _stage_dispatch,
+    "fleet-accept": _stage_accept,
+    "accept": _stage_accept,
     "mytodo": _stage_todo,
     "myresearcher": _stage_researcher,
     "mytester": _stage_tester,
@@ -616,7 +627,19 @@ def _run_cycle(args: argparse.Namespace, *, accounts: str, skip_dispatch: bool, 
     failed: list[tuple[str, int]] = []
     ctx = _Ctx(args=args, accounts=accounts, skip_dispatch=skip_dispatch, py=py)
     concurrency = getattr(args, "concurrency", 1)
-    for wave in build_waves():
+    waves = build_waves()
+    has_accept = any(item.stage in ("fleet-accept", "accept") for w in waves for item in w)
+    if not has_accept:
+        from mypipeline.plan import PlanItem
+        accept_item = PlanItem(node_id="accept", stage="fleet-accept", engine="none")
+        new_waves = []
+        for w in waves:
+            new_waves.append(w)
+            if any(item.stage == "fleet-dispatch" for item in w):
+                new_waves.append([accept_item])
+        waves = new_waves
+
+    for wave in waves:
         if len(wave) > 1:
             print(f"(wave: {', '.join(i.stage for i in wave)} — no dependency between them)")
         wave_stages: list[Stage] = []
