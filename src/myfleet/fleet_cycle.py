@@ -120,6 +120,7 @@ EXCLUDED_REPOS = {"my-template"}
 # drops all eight from the build tick; fleet-bookkeeping.service passes
 # --skip-dispatch instead so this set is the only thing left for it to run.
 BOOKKEEPING_STAGES = {
+    "mytodo",
     "mytester",
     "mychangelogger",
     "mydocs",
@@ -456,6 +457,27 @@ def _stage_handoffs(ctx: _Ctx) -> list[Stage]:
     ]
 
 
+def _stage_todo(ctx: _Ctx) -> list[Stage]:
+    return [
+        Stage(
+            "mytodo",
+            [
+                "mytodo",
+                "curate",
+                "--org",
+                ORG,
+                "--source",
+                str(WORKSPACE_ROOT),
+                "--target-repo",
+                f"{ORG}/my-things-core",
+                "--engine",
+                ctx.args.engine,
+            ],
+            mutating=False,
+        )
+    ]
+
+
 def _stage_telegram(ctx: _Ctx) -> list[Stage]:
     return [Stage("mytelegrambot", ["mytelegrambot", "notify"])]
 
@@ -474,6 +496,7 @@ RESOLVERS: dict[str, Callable[[_Ctx], list[Stage]]] = {
     "red-main": _stage_red_main,
     "myplanner": _stage_planner,
     "fleet-dispatch": _stage_dispatch,
+    "mytodo": _stage_todo,
     "myresearcher": _stage_researcher,
     "mytester": _stage_tester,
     "mychangelogger": _stage_changelogger,
