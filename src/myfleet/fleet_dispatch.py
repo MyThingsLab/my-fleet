@@ -265,44 +265,6 @@ def _parse_accounts(raw: str) -> list[Account]:
     return accounts
 
 
-_KERNEL_REPOS = frozenset({
-    "my-fleet",
-    "my-orchestrator",
-    "my-coder",
-    "my-searcher",
-    "my-guard",
-    "my-telegram-bot",
-    "my-pipeline",
-    "my-scaffolder",
-    "my-planner",
-    "my-tester",
-    "my-reporter",
-    "my-changelogger",
-})
-
-
-def _repo_wave(repo_name: str) -> int:
-    """Return topographical architectural wave for a repo:
-    0: core (my-things-core)
-    1: kernel (core orchestration & developer tooling)
-    2: product (product tools)
-    3: external
-    """
-    if repo_name == "my-things-core":
-        return 0
-    if repo_name in _KERNEL_REPOS:
-        return 1
-    if repo_name.startswith("my-"):
-        return 2
-    return 3
-
-
-def sort_candidates_by_wave(candidates: list[Candidate]) -> list[Candidate]:
-    """Sort candidates by architectural wave (core -> kernel -> product -> external)."""
-    return sorted(candidates, key=lambda c: _repo_wave(c.repo))
-
-
-
 def _account_uuid(config_dir: Path) -> str | None:
     # The account a config dir is logged into is recorded by `claude auth login`
     # in .claude.json under oauthAccount. Read-only; no token is touched.
@@ -535,6 +497,14 @@ _RESUMABLE_OUTCOMES = frozenset({"needs_review", "no_changes", "failed", "deferr
 # is fine, the fleet just couldn't run right then, so retrying it must not burn
 # the budget that escalates a genuinely-stuck issue to a human.
 _COUNTED_OUTCOMES = _TERMINAL_OUTCOMES - {"deferred"}
+# Outcomes that mean a worker actually took an issue this run: it started, or it
+# reached some terminal verdict. Every *other* dispatch outcome
+# ("backlog_empty", "no_dispatchable_candidates", "halted_critical") is a note
+# that nothing happened. Exported because fleet_cycle's --loop has to tell those
+# apart to decide whether to back off, and inferring it from "did the ledger
+# grow" counts the idle notes as work (#105). Deliberately a positive list: a
+# new not-actually-work outcome added later is treated as idle by default.
+WORK_OUTCOMES = _TERMINAL_OUTCOMES | {"started"}
 # Substrings that mark a failure as transient/infrastructure rather than a real
 # problem with the issue. Matched case-insensitively against the worker's final
 # message. Kept deliberately narrow -- only unambiguous capacity/transport
@@ -1279,8 +1249,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"skipping (already has an open fleet-dispatch PR): {names}")
         dispatchable = [c for c in dispatchable if c.id not in ids]
 
-    dispatchable = sort_candidates_by_wave(dispatchable)
-
+    # No re-sort here, deliberately. The order `Orchestrator.next_n` returned is
+    # `mythings.labels.sort_key`'s, which ranks priority above lane on purpose;
+    # a second pass keyed on lane makes lane primary again and demotes every
+    # `prio:P0` outside core behind every `prio:P3` inside it. "Core stays
+    # stable" is already carried by that key's lane tiebreak, where it decides
+    # among equals instead of overruling them.
     dispatch_ledger = Ledger(DISPATCH_LEDGER)
 
     # Resume/recover routing: read each issue's last attempt and decide whether

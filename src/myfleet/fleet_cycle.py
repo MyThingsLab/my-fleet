@@ -62,6 +62,7 @@ import concurrent.futures
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -77,7 +78,12 @@ import myfleet.fleet_ask as fleet_ask
 import myfleet.heartbeat as heartbeat
 import myfleet.preflight as preflight
 from myfleet.cycle_driver import Stage, import_or_die, run_command
-from myfleet.fleet_dispatch import DISPATCH_LEDGER, HALT_MARKER, _critical_halt_issues
+from myfleet.fleet_dispatch import (
+    DISPATCH_LEDGER,
+    HALT_MARKER,
+    WORK_OUTCOMES,
+    _critical_halt_issues,
+)
 from myfleet.workspace import fleet_root
 
 build_waves = import_or_die("mypipeline.plan", "build_waves", "my-pipeline")
@@ -355,6 +361,14 @@ def _stage_docs(ctx: _Ctx) -> list[Stage]:
     docs_site_root = WORKSPACE_ROOT / DOCS_SITE_CLONE
     if not docs_site_root.is_dir():
         return [Stage("mydocs", [], skip=f"no local docs-site clone at {docs_site_root}")]
+    # my-docs is archived and `mydocs` is not installed in the deployed venv, so
+    # on a host that does have the docs-site clone this stage execs a command
+    # that isn't there. It has been failing every cycle; with #101 propagating
+    # exit codes that would now (correctly) turn every cycle red. Skip on a
+    # missing binary rather than fail on it -- an uninstalled optional tool is
+    # the same kind of absence as the missing clone above.
+    if shutil.which("mydocs") is None:
+        return [Stage("mydocs", [], skip="mydocs is not installed (my-docs is archived)")]
     return [
         Stage(
             "mydocs",
@@ -495,16 +509,18 @@ RESOLVERS: dict[str, Callable[[_Ctx], list[Stage]]] = {
 }
 
 
-def _execute_stage(stage: Stage, *, execute: bool) -> None:
+def _execute_stage(stage: Stage, *, execute: bool) -> int:
     # Same dry-run/skip semantics as cycle_driver.run_stage, but routed through
     # this module's `_run` so the workspace-root cwd (and the test seam) hold.
+    # Returns the stage's exit code so a failure can reach the cycle's outcome;
+    # a skipped or dry-run stage did not fail, so both report 0.
     if stage.skip is not None:
         print(f"(skipping {stage.name} — {stage.skip})")
-        return
+        return 0
     if stage.mutating and not execute:
         print(f"(dry run — would run: {' '.join(stage.argv)})")
-        return
-    _run(stage.argv, env=stage.env)
+        return 0
+    return _run(stage.argv, env=stage.env)
 
 
 def _execute_stage_buffered(stage: Stage, *, execute: bool) -> tuple[Stage, str, int]:
@@ -512,37 +528,67 @@ def _execute_stage_buffered(stage: Stage, *, execute: bool) -> tuple[Stage, str,
     buf = io.StringIO()
     rc = 0
     with redirect_stdout(buf), redirect_stderr(buf):
-        try:
-            _execute_stage(stage, execute=execute)
-        except Exception as exc:
-            print(f"Error executing {stage.name}: {exc}", file=sys.stderr)
-            rc = 1
+        rc = _execute_stage_guarded(stage, execute=execute)
     return stage, buf.getvalue(), rc
+
+
+def _execute_stage_guarded(stage: Stage, *, execute: bool) -> int:
+    # A raising stage and an exiting-nonzero stage are the same event to the
+    # cycle: one tool in a best-effort chain did not do its job. The serial and
+    # concurrent paths used to disagree about that -- concurrent caught the
+    # exception, serial let it abort the whole wave -- so both go through here.
+    try:
+        return _execute_stage(stage, execute=execute)
+    except Exception as exc:
+        print(f"Error executing {stage.name}: {exc}", file=sys.stderr)
+        return 1
 
 
 def _execute_wave(
     stages: list[Stage], *, execute: bool, concurrency: int = 1
-) -> None:
+) -> list[tuple[str, int]]:
+    """Run one wave; return (stage name, exit code) for every stage that failed."""
     if len(stages) <= 1 or concurrency <= 1:
-        for stage in stages:
-            _execute_stage(stage, execute=execute)
-        return
+        results = [(s, _execute_stage_guarded(s, execute=execute)) for s in stages]
+        return [(s.name, rc) for s, rc in results if rc != 0]
 
+    failed: list[tuple[str, int]] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
         futures = [
-            executor.submit(_execute_stage_buffered, stage, execute=execute)
-            for stage in stages
+            executor.submit(_execute_stage_buffered, stage, execute=execute) for stage in stages
         ]
         for future in futures:
-            stage, output, _ = future.result()
+            stage, output, rc = future.result()
             if output.strip():
                 print(f"--- [{stage.name}] ---")
                 sys.stdout.write(output)
                 if not output.endswith("\n"):
                     sys.stdout.write("\n")
+            if rc != 0:
+                failed.append((stage.name, rc))
+    return failed
 
 
-def _run_cycle(args: argparse.Namespace, *, accounts: str, skip_dispatch: bool, py: str) -> None:
+def _record_cycle_outcome(ledger: Ledger, failed: list[tuple[str, int]]) -> None:
+    # The cycle's own verdict, separate from the heartbeat. A heartbeat says
+    # "this process reached that line"; this says whether the stages it ran
+    # actually worked. Recording only the heartbeat is what let 301 consecutive
+    # cycles read `ok` while a stage failed in every one of them (#101).
+    if not failed:
+        ledger.record(tool="fleet_cycle", kind="cycle", outcome="ok", detail="all stages exited 0")
+        return
+    names = ", ".join(f"{name} (rc={rc})" for name, rc in failed)
+    print(f"(cycle finished with {len(failed)} failed stage(s): {names})", file=sys.stderr)
+    ledger.record(
+        tool="fleet_cycle",
+        kind="cycle",
+        outcome="stage_failed",
+        detail=f"{len(failed)} stage(s) failed: {names}",
+        failed_stages=[name for name, _ in failed],
+    )
+
+
+def _run_cycle(args: argparse.Namespace, *, accounts: str, skip_dispatch: bool, py: str) -> int:
     # Heartbeats record liveness, not success -- proof the systemd unit's
     # ExecStart path still resolves and this process still reaches this line,
     # regardless of --execute or a HALT below. That's deliberately weaker than
@@ -560,8 +606,14 @@ def _run_cycle(args: argparse.Namespace, *, accounts: str, skip_dispatch: bool, 
         reason = _cycle_halt_reason()
         if reason is not None:
             print(f"(cycle halted — {reason})")
-            return
+            # Its own outcome, not `ok` and not a failure: a halt is the kill
+            # switch working, and reporting it as either hides which happened.
+            dispatch_ledger.record(
+                tool="fleet_cycle", kind="cycle", outcome="halted", detail=reason
+            )
+            return 0
 
+    failed: list[tuple[str, int]] = []
     ctx = _Ctx(args=args, accounts=accounts, skip_dispatch=skip_dispatch, py=py)
     concurrency = getattr(args, "concurrency", 1)
     for wave in build_waves():
@@ -577,7 +629,13 @@ def _run_cycle(args: argparse.Namespace, *, accounts: str, skip_dispatch: bool, 
                 print(f"(no resolver for graph stage {item.stage!r} — skipping)")
                 continue
             wave_stages.extend(resolver(ctx))
-        _execute_wave(wave_stages, execute=args.execute, concurrency=concurrency)
+        # Best-effort, same as cycle_driver.run_cycle: a failed stage does not
+        # abort the pass (the later stages are independent tools), it is
+        # collected and surfaced in the cycle's outcome.
+        failed.extend(_execute_wave(wave_stages, execute=args.execute, concurrency=concurrency))
+
+    _record_cycle_outcome(dispatch_ledger, failed)
+    return 1 if failed else 0
 
 
 def _loop_should_stop(
@@ -594,6 +652,22 @@ def _loop_should_stop(
     if max_cycle_budget_usd is not None and spent_usd >= max_cycle_budget_usd:
         return f"reached --max-cycle-budget-usd {max_cycle_budget_usd} (${spent_usd:.2f} spent)"
     return None
+
+
+def _work_entry_count(ledger: Ledger) -> int:
+    """How many dispatch entries so far represent a worker actually taking an issue.
+
+    Not the raw entry count. fleet_dispatch records an entry on exactly the
+    paths where nothing happened too -- backlog_empty, no_dispatchable_
+    candidates, halted_critical -- so "the ledger grew" reads an idle pass as a
+    busy one, and the halted case turns a stop signal into the tightest possible
+    polling loop against the GitHub API (#105).
+    """
+    return sum(
+        1
+        for e in ledger.read(tool="fleet_dispatch", kind="dispatch")
+        if e.outcome in WORK_OUTCOMES
+    )
 
 
 def _next_backoff_s(
@@ -735,10 +809,10 @@ def _run_loop(args: argparse.Namespace, py: str) -> int:
                 + ")"
             )
 
-        entries_before = len(dispatch_ledger.read(tool="fleet_dispatch"))
+        work_before = _work_entry_count(dispatch_ledger)
         cycle_accounts = ",".join(usable_accounts) if usable_accounts else args.accounts
         _run_cycle(args, accounts=cycle_accounts, skip_dispatch=skip_dispatch, py=py)
-        dispatched = len(dispatch_ledger.read(tool="fleet_dispatch")) > entries_before
+        dispatched = _work_entry_count(dispatch_ledger) > work_before
 
         backoff_s = _next_backoff_s(
             backoff_s,
@@ -746,9 +820,15 @@ def _run_loop(args: argparse.Namespace, py: str) -> int:
             idle_backoff_s=idle_backoff_s,
             max_backoff_s=args.max_backoff_min * 60.0,
         )
-        if not dispatched:
+        # Always sleep, and _next_backoff_s already says how long: the floor
+        # after an iteration that did work, the doubled backoff after one that
+        # didn't. Sleeping only in the idle branch meant the idle case -- the
+        # one this backoff exists for -- was the case that spun.
+        if dispatched:
+            print(f"(dispatched this iteration — next pass in {backoff_s:.0f}s)")
+        else:
             print(f"(nothing dispatched this iteration — backing off {backoff_s:.0f}s)")
-            time.sleep(backoff_s)
+        time.sleep(backoff_s)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -925,13 +1005,16 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         accounts = ",".join(p.config_dir for p in live)
 
-    _run_cycle(args, accounts=accounts, skip_dispatch=skip_dispatch, py=py)
+    rc = _run_cycle(args, accounts=accounts, skip_dispatch=skip_dispatch, py=py)
 
     if not args.execute:
         print(
             "\n(dry run — pass --execute to run myresearcher/mytester/mychangelogger/mydocs/mydashboard/myprojector/myreporter/mytelegrambot for real; --dispatch-execute for fleet_dispatch's billed sessions)"
         )
-    return 0
+    # Nonzero on a failed stage, so the timer's OnFailure= alert fires. Until
+    # now the unit could only fail by crashing, which is why a stage failing
+    # every run for weeks produced no alert at all (#101).
+    return rc
 
 
 if __name__ == "__main__":
