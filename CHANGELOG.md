@@ -34,6 +34,11 @@ All notable changes to `my-fleet` are documented here. Format follows
   versioned somewhere writable.
 - `scripts/fanout_pythonpath.py` — applies the `pythonpath = ["src"]` pytest
   fix across product repos. Ported from the archived `fleet-dispatch#69`.
+- `repo_registry.py` (`repo-registry` script) — flags a MyThingsLab repo
+  that's gone from GitHub without a matching, version-controlled decision in
+  its `RETIRED` dict, so a deletion like `my-office`/`my-city`'s (#87) is
+  caught mechanically instead of by a review noticing months later. Retires
+  both of those repos with a written decision as part of landing the check.
 
 ## [2.0.0] - 2026-07-22
 
