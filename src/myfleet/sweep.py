@@ -320,7 +320,15 @@ def apply_to(
             return RepoOutcome(name, "would_change", f"{len(changed)} file(s)", changed=changed)
 
         for argv in (
-            ["git", "checkout", "-b", branch],
+            # -B, not -b. A run that died after the branch was created but
+            # before the push -- which is what the pre-commit hook failure did
+            # to 4 repos -- leaves the branch behind in the real repo, and there
+            # is no open PR for `_existing_pr` to find, so the retry came back
+            # here and `-b` refused with "a branch named ... already exists".
+            # A sweep that cannot be retried after a partial failure is no use;
+            # resetting is safe because `sweep/<transform>` is a name this tool
+            # owns outright, and an already-pushed one was caught as in_flight.
+            ["git", "checkout", "-B", branch],
             ["git", "add", "--all"],
             ["git", "commit", "-m", transform.title],
             ["git", "push", "--set-upstream", "origin", branch],

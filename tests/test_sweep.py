@@ -218,6 +218,30 @@ def test_the_scratch_worktree_is_always_cleaned_up(tmp_path: Path) -> None:
     assert "sweep-t" not in listed
 
 
+def test_a_sweep_can_be_retried_after_a_partial_failure(tmp_path: Path) -> None:
+    # A run that dies between `checkout -b` and the push leaves the branch
+    # behind in the real repo, and with no PR pushed there is nothing for
+    # `_existing_pr` to find -- so the retry comes straight back here. With
+    # `-b` that retry died on "a branch named 'sweep/t' already exists",
+    # permanently: every subsequent run failed the same way. This is exactly
+    # what the pre-commit hook failure did to 4 repos in the first real sweep.
+    repo = make_repo(tmp_path, "my-a")
+    failed = sweep.apply_to(
+        repo,
+        harness_transform(),
+        execute=True,
+        allow_unchecked=False,
+        runner=fake_runner([], fail="git push"),
+    )
+    assert failed.state == "failed"
+
+    retried = sweep.apply_to(
+        repo, harness_transform(), execute=True, allow_unchecked=False, runner=fake_runner([])
+    )
+
+    assert retried.state == "opened"
+
+
 def test_an_archived_repo_is_skipped_not_failed(tmp_path: Path) -> None:
     # An archived repo is read-only: the push cannot succeed now or ever.
     # Reported as `failed` it makes a permanent condition look transient and
