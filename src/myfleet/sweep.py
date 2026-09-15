@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -62,8 +63,25 @@ DEFAULT_LEDGER = ledger_path(WORKSPACE_ROOT)
 Runner = Callable[[list[str], Path], "tuple[int, str]"]
 
 
+# `git commit` runs the repo's pre-commit hooks, and the fleet's are
+# `language: system` -- `ruff check`, `pytest -q`. A scratch worktree inherits
+# no activated virtualenv, so those resolve against a bare PATH and the commit
+# dies on a conftest `ModuleNotFoundError: mythings`, which reads exactly like
+# the sweep having broken the repo. Putting the shared venv on PATH lets the
+# hooks actually run and actually pass -- far better than reaching for
+# `--no-verify`, which would commit straight past a real gate.
+VENV_BIN = WORKSPACE_ROOT / ".venv" / "bin"
+
+
+def _env() -> dict[str, str]:
+    env = dict(os.environ)
+    if VENV_BIN.is_dir():
+        env["PATH"] = f"{VENV_BIN}{os.pathsep}{env.get('PATH', '')}"
+    return env
+
+
 def _run(argv: list[str], cwd: Path) -> tuple[int, str]:
-    proc = subprocess.run(argv, cwd=cwd, capture_output=True, text=True)
+    proc = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, env=_env())
     return proc.returncode, (proc.stdout + proc.stderr).strip()
 
 
@@ -219,17 +237,42 @@ def _existing_pr(repo: Path, branch: str, runner: Runner) -> str:
     return str(found[0]["url"]) if found else ""
 
 
+def archived_repos(org: str, *, runner: Runner = _run, cwd: Path | None = None) -> set[str]:
+    """Names in `org` that are archived, hence read-only, hence unsweepable.
+
+    One org-wide call rather than one per repo: a sweep already makes two
+    network round-trips per repo and this would be a third.
+    """
+    code, out = runner(
+        ["gh", "repo", "list", org, "--json", "name,isArchived", "--limit", "300"],
+        cwd or Path.cwd(),
+    )
+    if code != 0:
+        return set()
+    try:
+        return {str(e["name"]) for e in json.loads(out) if e.get("isArchived")}
+    except (json.JSONDecodeError, TypeError):
+        return set()
+
+
 def apply_to(
     repo: Path,
     transform: Transform,
     *,
     execute: bool,
     allow_unchecked: bool,
+    archived: frozenset[str] = frozenset(),
     runner: Runner = _run,
 ) -> RepoOutcome:
     """Run `transform` against a throwaway worktree of `repo` off origin/main."""
     name = repo.name
     branch = branch_for(transform)
+
+    if name in archived:
+        # An archived repo is read-only: the push cannot succeed, now or ever.
+        # Reporting it as `failed` makes a permanent condition look like a
+        # transient one and buries the real failures under it every single run.
+        return RepoOutcome(name, "archived", "archived on GitHub, read-only")
 
     existing = _existing_pr(repo, branch, runner)
     if existing:
@@ -301,13 +344,14 @@ def apply_to(
         shutil.rmtree(scratch, ignore_errors=True)
 
 
-_ORDER = ["failed", "ci_blocked", "opened", "would_change", "in_flight", "current"]
+_ORDER = ["failed", "ci_blocked", "opened", "would_change", "in_flight", "archived", "current"]
 _ICON = {
     "failed": "❌",
     "ci_blocked": "🚧",
     "opened": "🚢",
     "would_change": "✏️",
     "in_flight": "⏳",
+    "archived": "📦",
     "current": "✅",
 }
 
@@ -330,10 +374,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--ledger", type=Path, default=DEFAULT_LEDGER)
     parser.add_argument("--jobs", type=int, default=8, help="repos to sweep concurrently")
+    parser.add_argument("--org", default="MyThingsLab", help="org to read archived repos from")
     args = parser.parse_args(argv)
 
     transform = TRANSFORMS[args.transform]
     repos = sweep_repos(args.root, args.only)
+    archived = frozenset(archived_repos(args.org, cwd=args.root))
     # Two network round-trips per repo (`git fetch`, `gh pr list`) times fifty
     # repos is minutes of wall clock, serially -- long enough that the first
     # fleet-scale run of this was killed by a timeout rather than finishing.
@@ -347,6 +393,7 @@ def main(argv: list[str] | None = None) -> int:
                     transform,
                     execute=args.execute,
                     allow_unchecked=args.allow_unchecked,
+                    archived=archived,
                 ),
                 repos,
             )

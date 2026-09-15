@@ -218,6 +218,64 @@ def test_the_scratch_worktree_is_always_cleaned_up(tmp_path: Path) -> None:
     assert "sweep-t" not in listed
 
 
+def test_an_archived_repo_is_skipped_not_failed(tmp_path: Path) -> None:
+    # An archived repo is read-only: the push cannot succeed now or ever.
+    # Reported as `failed` it makes a permanent condition look transient and
+    # buries the real failures under it on every run. Four of these turned the
+    # first real fleet sweep's summary from readable into noise.
+    repo = make_repo(tmp_path, "my-a")
+    log: list[list[str]] = []
+
+    out = sweep.apply_to(
+        repo,
+        harness_transform(),
+        execute=True,
+        allow_unchecked=False,
+        archived=frozenset({"my-a"}),
+        runner=fake_runner(log),
+    )
+
+    assert out.state == "archived"
+    assert log == []  # not even a `gh pr list` is worth spending on it
+
+
+def test_archived_repos_come_from_one_org_wide_call(tmp_path: Path) -> None:
+    log: list[list[str]] = []
+
+    def runner(argv: list[str], cwd: Path) -> tuple[int, str]:
+        log.append(argv)
+        return 0, '[{"name":"my-old","isArchived":true},{"name":"my-new","isArchived":false}]'
+
+    assert sweep.archived_repos("MyThingsLab", runner=runner, cwd=tmp_path) == {"my-old"}
+    assert len(log) == 1  # one call for the whole org, not one per repo
+
+
+def test_archived_lookup_failing_does_not_stop_the_sweep(tmp_path: Path) -> None:
+    # Losing the archived list should cost us a clean skip, not the whole run.
+    assert sweep.archived_repos("x", runner=lambda a, c: (1, "boom"), cwd=tmp_path) == set()
+    assert sweep.archived_repos("x", runner=lambda a, c: (0, "not json"), cwd=tmp_path) == set()
+
+
+def test_the_commit_can_see_the_shared_venv(tmp_path: Path, monkeypatch) -> None:
+    # The fleet's pre-commit hooks are `language: system` (`ruff check`,
+    # `pytest -q`). A scratch worktree activates no virtualenv, so they resolved
+    # against a bare PATH and the commit died on a conftest
+    # `ModuleNotFoundError: mythings` -- which reads as the sweep having broken
+    # the repo. This is what stopped 17 of the first real ci-md sweep's repos.
+    venv_bin = tmp_path / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    monkeypatch.setattr(sweep, "VENV_BIN", venv_bin)
+
+    assert sweep._env()["PATH"].startswith(f"{venv_bin}:")
+
+
+def test_a_missing_venv_leaves_path_alone(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(sweep, "VENV_BIN", tmp_path / "nope" / "bin")
+    monkeypatch.setenv("PATH", "/usr/bin")
+
+    assert sweep._env()["PATH"] == "/usr/bin"
+
+
 @pytest.mark.parametrize(
     ("pattern", "path", "ignored"),
     [
