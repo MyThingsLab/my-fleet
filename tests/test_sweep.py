@@ -280,7 +280,7 @@ def test_archived_lookup_failing_does_not_stop_the_sweep(tmp_path: Path) -> None
     assert sweep.archived_repos("x", runner=lambda a, c: (0, "not json"), cwd=tmp_path) == set()
 
 
-def test_the_commit_can_see_the_shared_venv(tmp_path: Path, monkeypatch) -> None:
+def test_the_commit_can_see_the_shared_venv(tmp_path: Path) -> None:
     # The fleet's pre-commit hooks are `language: system` (`ruff check`,
     # `pytest -q`). A scratch worktree activates no virtualenv, so they resolved
     # against a bare PATH and the commit died on a conftest
@@ -288,16 +288,31 @@ def test_the_commit_can_see_the_shared_venv(tmp_path: Path, monkeypatch) -> None
     # the repo. This is what stopped 17 of the first real ci-md sweep's repos.
     venv_bin = tmp_path / ".venv" / "bin"
     venv_bin.mkdir(parents=True)
-    monkeypatch.setattr(sweep, "VENV_BIN", venv_bin)
 
-    assert sweep._env()["PATH"].startswith(f"{venv_bin}:")
+    assert sweep.venv_bin_for(tmp_path) == venv_bin
+    assert sweep._env(venv_bin)["PATH"].startswith(f"{venv_bin}:")
 
 
 def test_a_missing_venv_leaves_path_alone(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(sweep, "VENV_BIN", tmp_path / "nope" / "bin")
     monkeypatch.setenv("PATH", "/usr/bin")
 
-    assert sweep._env()["PATH"] == "/usr/bin"
+    assert sweep.venv_bin_for(tmp_path) is None
+    assert sweep._env(None)["PATH"] == "/usr/bin"
+
+
+def test_the_venv_comes_from_the_swept_root_not_this_modules_own(tmp_path: Path) -> None:
+    # The first attempt derived it from module-level WORKSPACE_ROOT. Run from a
+    # session worktree that climb lands in `.claude/worktrees/<name>/`, whose
+    # `.venv` does not exist -- so the injection silently did nothing and every
+    # hooked repo failed exactly as before. A no-op fix that looks applied is
+    # worse than no fix: the next reader stops looking at this line.
+    real_root = tmp_path / "fleet"
+    (real_root / ".venv" / "bin").mkdir(parents=True)
+    worktree_root = tmp_path / "fleet" / ".claude" / "worktrees" / "w"
+    worktree_root.mkdir(parents=True)
+
+    assert sweep.venv_bin_for(real_root) is not None
+    assert sweep.venv_bin_for(worktree_root) is None
 
 
 @pytest.mark.parametrize(
@@ -335,6 +350,35 @@ def test_ci_md_transform_leaves_an_unfamiliar_workflow_alone(tmp_path: Path) -> 
     sweep.TRANSFORMS["ci-md"].apply(repo)
 
     assert (repo / ".github" / "workflows" / "ci.yml").read_text() == odd
+
+
+def test_composing_transforms_applies_both_in_one_commit(tmp_path: Path) -> None:
+    # `harness` and `ci-md` are deadlocked against each other: `harness` commits
+    # but its `.md`-only PR gets no `test` check and can never merge, while
+    # `ci-md` would merge but cannot be committed, because the repo's pre-commit
+    # hook runs pytest and the harness-drift test is already red on the stale
+    # copy it does not touch. Composed, each fixes the other's blocker.
+    repo = make_repo(tmp_path, "my-a", workflow=WORKFLOW)
+    both = sweep.compose(["harness", "ci-md"])
+
+    out = sweep.apply_to(
+        repo, both, execute=False, allow_unchecked=False, runner=fake_runner([])
+    )
+
+    assert out.state == "would_change"
+    assert out.changed == [".github/workflows/ci.yml", "HARNESS.md"]
+    # And because it now touches a non-ignored path, it is no longer CI-blocked.
+    assert out.state != "ci_blocked"
+
+
+def test_composing_names_the_branch_for_the_whole_set(tmp_path: Path) -> None:
+    both = sweep.compose(["harness", "ci-md"])
+    assert sweep.branch_for(both) == "sweep/harness+ci-md"
+    assert "HARNESS.md" in both.body and "paths-ignore" in both.body
+
+
+def test_composing_one_transform_is_that_transform(tmp_path: Path) -> None:
+    assert sweep.compose(["harness"]) is sweep.TRANSFORMS["harness"]
 
 
 def test_sweep_repos_finds_sibling_checkouts_and_rejects_unknown_names(tmp_path: Path) -> None:

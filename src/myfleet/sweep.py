@@ -28,8 +28,9 @@ changes a sweep is best at -- `HARNESS.md`, agent instructions, CI workflows --
 are on the workspace's "needs a human however green they are" list precisely
 because merging a bad one destroys the ability to catch the next one.
 
-    python -m myfleet.sweep harness                 # dry run: who needs it
-    python -m myfleet.sweep harness --execute       # branch, commit, push, PR
+    python -m myfleet.sweep harness                  # dry run: who needs it
+    python -m myfleet.sweep harness --execute        # branch, commit, push, PR
+    python -m myfleet.sweep harness ci-md --execute  # both, as one PR per repo
     python -m myfleet.sweep harness --only my-guard my-coder
 """
 
@@ -70,19 +71,33 @@ Runner = Callable[[list[str], Path], "tuple[int, str]"]
 # the sweep having broken the repo. Putting the shared venv on PATH lets the
 # hooks actually run and actually pass -- far better than reaching for
 # `--no-verify`, which would commit straight past a real gate.
-VENV_BIN = WORKSPACE_ROOT / ".venv" / "bin"
+#
+# Derived from the root being swept, never from this module's own
+# WORKSPACE_ROOT: run from a session worktree, that climb lands in
+# `.claude/worktrees/<name>/`, whose `.venv` does not exist -- so the injection
+# silently did nothing and every hooked repo still failed. A no-op fix that
+# looks applied is worse than no fix, because the next reader stops looking.
+def venv_bin_for(root: Path) -> Path | None:
+    bin_dir = root / ".venv" / "bin"
+    return bin_dir if bin_dir.is_dir() else None
 
 
-def _env() -> dict[str, str]:
+def _env(venv_bin: Path | None) -> dict[str, str]:
     env = dict(os.environ)
-    if VENV_BIN.is_dir():
-        env["PATH"] = f"{VENV_BIN}{os.pathsep}{env.get('PATH', '')}"
+    if venv_bin is not None:
+        env["PATH"] = f"{venv_bin}{os.pathsep}{env.get('PATH', '')}"
     return env
 
 
-def _run(argv: list[str], cwd: Path) -> tuple[int, str]:
-    proc = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, env=_env())
+def _run(argv: list[str], cwd: Path, *, venv_bin: Path | None = None) -> tuple[int, str]:
+    proc = subprocess.run(
+        argv, cwd=cwd, capture_output=True, text=True, env=_env(venv_bin)
+    )
     return proc.returncode, (proc.stdout + proc.stderr).strip()
+
+
+def runner_for(venv_bin: Path | None) -> Runner:
+    return lambda argv, cwd: _run(argv, cwd, venv_bin=venv_bin)
 
 
 @dataclass(frozen=True)
@@ -131,6 +146,33 @@ def _drop_md_from_paths_ignore(repo: Path) -> None:
             # An ignore list that is now empty is dropped entirely: an empty
             # `paths-ignore: []` is not the same trigger as no paths-ignore key.
         workflow.write_text("".join(out), encoding="utf-8")
+
+
+# Two transforms can be deadlocked against each other, and `harness` and
+# `ci-md` are: `harness` commits cleanly but its PR is `.md`-only, so
+# paths-ignore denies it a `test` check and it can never merge; `ci-md` would
+# merge fine but cannot be *committed*, because the repo's own pre-commit hook
+# runs pytest and `test_vendored_harness_matches_canonical` is already red on
+# the stale HARNESS.md it does not touch. Neither can go first.
+#
+# Composed into one PR each fixes the other's blocker: the vendored copy makes
+# the hook pass, and the workflow edit makes CI run. So composition is not a
+# convenience here, it is the only way either lands.
+def compose(names: list[str]) -> Transform:
+    parts = [TRANSFORMS[name] for name in names]
+    if len(parts) == 1:
+        return parts[0]
+
+    def apply(repo: Path) -> None:
+        for part in parts:
+            part.apply(repo)
+
+    return Transform(
+        name="+".join(names),
+        title=f"chore: {' and '.join(p.title.split(': ', 1)[-1] for p in parts)}",
+        body="\n\n---\n\n".join(f"### {p.title}\n\n{p.body}" for p in parts),
+        apply=apply,
+    )
 
 
 TRANSFORMS = {
@@ -366,7 +408,12 @@ _ICON = {
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("transform", choices=sorted(TRANSFORMS), help="which change to fan out")
+    parser.add_argument(
+        "transform",
+        nargs="+",
+        choices=sorted(TRANSFORMS),
+        help="which change(s) to fan out; several are composed into one PR per repo",
+    )
     parser.add_argument("--root", type=Path, default=WORKSPACE_ROOT)
     parser.add_argument("--only", nargs="+", metavar="REPO")
     parser.add_argument(
@@ -385,9 +432,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--org", default="MyThingsLab", help="org to read archived repos from")
     args = parser.parse_args(argv)
 
-    transform = TRANSFORMS[args.transform]
+    transform = compose(args.transform)
     repos = sweep_repos(args.root, args.only)
-    archived = frozenset(archived_repos(args.org, cwd=args.root))
+    runner = runner_for(venv_bin_for(args.root))
+    archived = frozenset(archived_repos(args.org, runner=runner, cwd=args.root))
     # Two network round-trips per repo (`git fetch`, `gh pr list`) times fifty
     # repos is minutes of wall clock, serially -- long enough that the first
     # fleet-scale run of this was killed by a timeout rather than finishing.
@@ -402,6 +450,7 @@ def main(argv: list[str] | None = None) -> int:
                     execute=args.execute,
                     allow_unchecked=args.allow_unchecked,
                     archived=archived,
+                    runner=runner,
                 ),
                 repos,
             )
