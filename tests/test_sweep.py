@@ -30,8 +30,16 @@ def make_repo(root: Path, name: str, *, harness: str = "old", workflow: str | No
         (repo / ".github" / "workflows" / "ci.yml").write_text(workflow, encoding="utf-8")
     for argv in (
         ["git", "init", "-q", "-b", "main"],
+        # Repo-local config, not `-c` on this one commit: `apply_to` makes a
+        # commit of its own inside a worktree, and a worktree inherits the
+        # repo's config. Without this the suite passes on any dev box with a
+        # global git identity and fails on a CI runner, which has none -- the
+        # commit dies on "Author identity unknown" and every assertion about
+        # the execute path reads `failed` instead of `opened`.
+        ["git", "config", "user.email", "t@t"],
+        ["git", "config", "user.name", "t"],
         ["git", "add", "--all"],
-        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"],
+        ["git", "commit", "-qm", "init"],
         # A sweep works off origin/main, so the fixture needs one. Pointing the
         # remote-tracking ref at the repo's own HEAD is enough for `git worktree
         # add origin/main` without standing up a second bare repo.
