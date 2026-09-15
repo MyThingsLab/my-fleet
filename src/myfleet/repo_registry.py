@@ -24,8 +24,8 @@ import argparse
 import json
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 ORG = "MyThingsLab"
 

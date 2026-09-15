@@ -58,12 +58,6 @@ def test_undocumented_deletions_reports_only_the_unexplained_ones() -> None:
     assert [state.repo for state in flagged] == ["ghost-repo"]
 
 
-def test_main_exits_zero_when_everything_is_explained(capsys) -> None:
-    runner = FakeRunner(missing={"my-office"})
-    exit_code = rr.main(["my-office", "my-fleet"])
-    assert exit_code in (0, 1)  # sanity: default runner path exercised separately below
-
-
 def test_main_reports_ok_for_fully_documented_repos(capsys, monkeypatch) -> None:
     runner = FakeRunner(missing={"my-office"})
     monkeypatch.setattr(rr, "_run", runner)
