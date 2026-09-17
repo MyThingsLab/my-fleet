@@ -13,9 +13,10 @@ covered here defers to `HARNESS.md`, then `my-things-core/docs/CONVENTIONS.md`.
   loop (`fleet_dispatch.py`), the full autonomous build cycle and its study
   counterpart (`fleet_cycle.py`, `study_cycle.py`, `cycle_driver.py`), the
   cross-repo test gate (`fleet_test.py`), ASK-channel merge routing
-  (`merge_ready_prs.py`, `merge_order_prs.py`, `fleet_ask.py`), and
-  usage/account monitoring (`account_usage.py`, `fleet_usage.py`,
-  `notify_usage.py`, `notify_systemd_status.py`).
+  (`merge_ready_prs.py`, `merge_order_prs.py`, `fleet_ask.py`), the
+  fleet-wide change fan-out (`sweep.py`), and usage/account monitoring
+  (`account_usage.py`, `fleet_usage.py`, `notify_usage.py`,
+  `notify_systemd_status.py`).
 - **The single Engine call:** none — deterministic, meta-tooling that
   orchestrates other My[X] tools rather than making judgment calls itself.
 - **Invariants / rules:**
@@ -29,6 +30,14 @@ covered here defers to `HARNESS.md`, then `my-things-core/docs/CONVENTIONS.md`.
     an `ASK` collapses to `DENY` unattended unless the ASK channel
     (`fleet_ask.py` + `my-telegram-bot`) is wired in.
   - A human always merges; nothing here calls `gh pr merge` on its own behalf.
+  - `sweep.py` fans a deterministic change out across every repo that needs
+    it, opening one PR per repo and stopping there — it never merges, and the
+    changes it is best at (`HARNESS.md`, agent instructions, CI workflows) are
+    on the workspace's "needs a human however green" list anyway. It works in
+    a throwaway worktree off `origin/main`, never in a checkout you have open,
+    and refuses by default to open a PR whose every changed path sits in that
+    repo's `paths-ignore` — such a PR gets no `test` check and, under a
+    required-check branch protection, can never be merged at all.
 - **Backlog label:** none — this repo is exempt from the standard My[X]
   backlog-label loop; issues here are fleet-ops housekeeping, not
   Engine-processed backlog items.

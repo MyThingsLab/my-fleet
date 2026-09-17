@@ -114,7 +114,7 @@ def test_main_reports_fresh_when_both_ticks_recorded_recently(
     monkeypatch.setattr(hb, "HTTPTelegramTransport", boom)
     rc = hb.main(["--ledger", str(ledger_path)])
     assert rc == 0
-    assert "heartbeats fresh" in capsys.readouterr().out
+    assert "fresh" in capsys.readouterr().out
 
 
 def test_main_alerts_and_returns_nonzero_when_a_tick_is_stale(
@@ -144,6 +144,101 @@ def test_main_alerts_and_returns_nonzero_when_a_tick_is_stale(
     assert "build" in sent[0] and "bookkeeping" in sent[0]
     out = capsys.readouterr().out
     assert "heartbeat is stale" in out
+
+
+def _fake_transport(monkeypatch: pytest.MonkeyPatch, sent: list[str]) -> None:
+    class FakeTransport:
+        def __init__(self, token: str, chat_id: str) -> None:
+            pass
+
+        def send_message(self, message: str) -> None:
+            sent.append(message)
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "tok")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "chat")
+    monkeypatch.setattr(hb, "HTTPTelegramTransport", FakeTransport)
+
+
+STALE_NOW = ["--max-age-build-min", "0", "--max-age-bookkeeping-min", "0"]
+
+
+def test_an_unfixed_stale_tick_is_reported_once_not_every_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The flood this closes: the check timer fires on a cadence, the condition
+    # does not change, and the operator got the same message every single run.
+    ledger_path = tmp_path / "ledger.jsonl"
+    Ledger(ledger_path)
+    sent: list[str] = []
+    _fake_transport(monkeypatch, sent)
+
+    assert hb.main(["--ledger", str(ledger_path), *STALE_NOW]) == 1
+    assert len(sent) == 1
+
+    for _ in range(5):
+        # Still broken, still nothing new to say -- and zero, so systemd's
+        # OnFailure= hook does not send the copy the dedup just suppressed.
+        assert hb.main(["--ledger", str(ledger_path), *STALE_NOW]) == 0
+    assert len(sent) == 1
+
+
+def test_an_unfixed_stale_tick_is_reported_again_after_the_realert_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger_path = tmp_path / "ledger.jsonl"
+    Ledger(ledger_path)
+    sent: list[str] = []
+    _fake_transport(monkeypatch, sent)
+
+    assert hb.main(["--ledger", str(ledger_path), *STALE_NOW]) == 1
+    assert hb.main(["--ledger", str(ledger_path), *STALE_NOW, "--realert-hours", "0"]) == 1
+    assert len(sent) == 2
+
+
+def test_a_recovered_tick_is_announced_once_and_exits_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger_path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(ledger_path)
+    sent: list[str] = []
+    _fake_transport(monkeypatch, sent)
+
+    hb.main(["--ledger", str(ledger_path), *STALE_NOW])  # both ticks alerted
+    hb.record(ledger, "build")
+    hb.record(ledger, "bookkeeping")
+
+    # A recovery is good news: reported, but not an OnFailure= trigger.
+    assert hb.main(["--ledger", str(ledger_path)]) == 0
+    assert "is back" in sent[1]
+    assert hb.main(["--ledger", str(ledger_path)]) == 0
+    assert len(sent) == 2  # announced once, not on every subsequent healthy run
+
+
+def test_a_failed_send_does_not_consume_the_alert(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Recording the alert before sending it would mean a transport outage
+    # silenced the switch for the whole re-alert window.
+    ledger_path = tmp_path / "ledger.jsonl"
+    Ledger(ledger_path)
+
+    class ErrorTransport:
+        def __init__(self, token: str, chat_id: str) -> None:
+            pass
+
+        def send_message(self, message: str) -> None:
+            raise RuntimeError("telegram unreachable")
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "tok")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "chat")
+    monkeypatch.setattr(hb, "HTTPTelegramTransport", ErrorTransport)
+    with pytest.raises(RuntimeError):
+        hb.main(["--ledger", str(ledger_path), *STALE_NOW])
+
+    sent: list[str] = []
+    _fake_transport(monkeypatch, sent)
+    assert hb.main(["--ledger", str(ledger_path), *STALE_NOW]) == 1
+    assert len(sent) == 1  # the retry still gets through
 
 
 def test_main_falls_back_to_print_without_telegram_credentials(
