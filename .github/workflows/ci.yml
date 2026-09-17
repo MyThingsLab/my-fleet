@@ -24,6 +24,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          # Neither `pull_request.base.sha` nor `event.before` exists in a
+          # shallow clone, and the diff below is what decides whether this job
+          # tests anything at all. Without full history that diff failed on
+          # every run, and the `|| true` turned the failure into "nothing
+          # changed" -- Install, Ruff and Tests skipped while the job reported
+          # success. The required `test` check is the merge gate's only
+          # evidence, so it was green without running.
           fetch-depth: 0
       - uses: actions/setup-python@v7
         with:
@@ -41,7 +48,16 @@ jobs:
             fi
             HEAD="HEAD"
           fi
-          CHANGED=$(git diff --name-only "$BASE" "$HEAD" | grep -vE '(\.md$|^docs/|^dev-ledger/)' || true)
+          # Fail closed. A base SHA can still be unreachable after a
+          # force-push or a GC, and "I could not tell what changed" must mean
+          # "run everything", never "skip everything" -- the cheap answer and
+          # the unsafe answer are the same one here.
+          if ! DIFF=$(git diff --name-only "$BASE" "$HEAD" 2>&1); then
+            echo "code_changed=true" >> "$GITHUB_OUTPUT"
+            echo "Could not diff $BASE..$HEAD; running the full job. ($DIFF)"
+            exit 0
+          fi
+          CHANGED=$(printf '%s\n' "$DIFF" | grep -vE '(\.md$|^docs/|^dev-ledger/)' || true)
           if [ -n "$CHANGED" ]; then
             echo "code_changed=true" >> "$GITHUB_OUTPUT"
           else
@@ -72,6 +88,13 @@ jobs:
           pip install --no-deps "my-orchestrator @ git+https://github.com/${{ github.repository_owner }}/my-orchestrator@main"
           # merge_ready_prs.py routes every merge through MyGuard's pr-merge ASK
           # rule, so the guard is a real dependency of this repo's scripts now.
+          #
+          # @main, not the v1.0.0 pin RELEASE.md wants, for the same reason as
+          # my-things-core above: there is no tag naming the code we need.
+          # tests/conftest.py imports `myguard.ask.AskChannelUnavailable`, added
+          # after v1.0.0 and never tagged, so the pin dies at collection before a
+          # single test runs. That was invisible while this job skipped Tests.
+          # Restore the pin once my-guard tags a release carrying it.
           pip install --no-deps "my-guard @ git+https://github.com/${{ github.repository_owner }}/my-guard@main"
           # notify_usage.py / notify_systemd_status.py import mytelegrambot.transport;
           # --no-deps for the same pre-rename-metadata reason as my-orchestrator.
