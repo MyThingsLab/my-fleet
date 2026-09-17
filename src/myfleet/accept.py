@@ -436,10 +436,14 @@ def settle(
             from myguard import Guard
             from myguard.rules import MERGE_ACTION
             from mythings.policy import Action, Decision
+
             guard = Guard()
         except ImportError:
             guard = None
 
+    # The listing's draft flag is deliberately unused: `assess` re-reads it from
+    # the API per PR, and a flag captured when the org listing was taken can be
+    # stale by the time this loop reaches that PR.
     for repo, number, title, _is_draft in open_prs:
         if repo_filter and repo not in repo_filter:
             continue
@@ -487,8 +491,9 @@ def settle(
         elif verdict is Verdict.NEEDS_HUMAN:
             approved = False
             if ask_human and guard is not None:
-                from myguard.rules import MERGE_ACTION
-                from mythings.policy import Action, Decision
+                # `Action`, `Decision` and `MERGE_ACTION` come from the import
+                # above: a non-None `guard` is exactly the evidence that it
+                # succeeded, and they share this function's scope.
                 action = Action(
                     kind=MERGE_ACTION,
                     payload={"repo": f"{ORG}/{repo}", "number": number, "title": title},
@@ -611,7 +616,6 @@ def main(argv: list[str] | None = None) -> int:
         from mythings.ledger import Ledger
 
         from myfleet.fleet_dispatch import DISPATCH_LEDGER
-
         ledger = Ledger(DISPATCH_LEDGER)
         assessments = settle(
             execute=args.execute,
