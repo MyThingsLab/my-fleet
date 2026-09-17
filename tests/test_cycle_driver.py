@@ -49,6 +49,18 @@ def test_skipped_stage_is_announced_and_not_run(
     assert "skipping x — no corpus" in capsys.readouterr().out
 
 
+def test_blocked_stage_is_announced_not_run_and_fails(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    calls, runner = _recorder()
+    rc = run_stage(
+        Stage("x", ["tool"], blocked="no corpus clone"), execute=True, cwd=tmp_path, runner=runner
+    )
+    assert calls == []
+    assert rc == 1
+    assert "x blocked — no corpus clone" in capsys.readouterr().out
+
+
 def test_run_cycle_runs_all_and_returns_worst_rc(tmp_path: Path) -> None:
     seen: list[str] = []
 

@@ -10,8 +10,12 @@ driver reimplements it.
 A `Stage` is one tool invocation. `mutating` stages (an Engine call, a PR, a file
 write) run only under `--execute` and otherwise print what they would do; a
 read-only stage (`mutating=False`) always runs. A stage with a `skip` reason is
-announced and skipped — the way a cycle handles a missing local checkout without
-aborting the rest of the pass.
+announced and skipped, rc 0 — the way a cycle handles a legitimate no-op (an
+optional tool that isn't installed, nothing left to do) without aborting the
+rest of the pass. A stage with a `blocked` reason is announced and also never
+runs, but returns rc 1: a precondition the stage itself requires (a local
+checkout it cannot work without) is missing, which is a misconfiguration to
+surface in the cycle's failure tally, not a skip a healthy run also takes.
 """
 
 from __future__ import annotations
@@ -64,7 +68,8 @@ class Stage:
     name: str
     argv: list[str]
     mutating: bool = True  # billed / side-effecting: runs only under --execute
-    skip: str | None = None  # a reason to skip this stage (printed), e.g. missing input
+    skip: str | None = None  # a reason to skip this stage (printed), e.g. nothing to do
+    blocked: str | None = None  # a reason this stage can't run (printed, rc 1), e.g. missing clone
     env: dict[str, str] | None = None
 
 
@@ -75,6 +80,9 @@ def run_stage(
     cwd: Path,
     runner: Runner = run_command,
 ) -> int:
+    if stage.blocked is not None:
+        print(f"({stage.name} blocked — {stage.blocked})")
+        return 1
     if stage.skip is not None:
         print(f"(skipping {stage.name} — {stage.skip})")
         return 0

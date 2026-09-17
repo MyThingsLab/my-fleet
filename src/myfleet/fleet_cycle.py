@@ -360,7 +360,13 @@ def _stage_changelogger(ctx: _Ctx) -> list[Stage]:
 def _stage_docs(ctx: _Ctx) -> list[Stage]:
     docs_site_root = WORKSPACE_ROOT / DOCS_SITE_CLONE
     if not docs_site_root.is_dir():
-        return [Stage("mydocs", [], skip=f"no local docs-site clone at {docs_site_root}")]
+        # A missing clone is a misconfigured host, not a legitimate no-op: it
+        # cannot fix itself, and reporting it as a skip is indistinguishable
+        # from a healthy pass in the log/ledger -- this stage no-op'd on every
+        # 6-hourly tick for weeks before anyone noticed (#130). `blocked` fails
+        # the stage instead, so it lands in the cycle's failed-stage tally and
+        # a nonzero exit reaches the systemd OnFailure Telegram alert.
+        return [Stage("mydocs", [], blocked=f"no local docs-site clone at {docs_site_root}")]
     # my-docs is archived and `mydocs` is not installed in the deployed venv, so
     # on a host that does have the docs-site clone this stage execs a command
     # that isn't there. It has been failing every cycle; with #101 propagating
@@ -388,7 +394,9 @@ def _stage_docs(ctx: _Ctx) -> list[Stage]:
 def _stage_dashboard(ctx: _Ctx) -> list[Stage]:
     docs_site_root = WORKSPACE_ROOT / DOCS_SITE_CLONE
     if not docs_site_root.is_dir():
-        return [Stage("mydashboard", [], skip=f"no local docs-site clone at {docs_site_root}")]
+        # See _stage_docs above (#130): a missing clone fails the stage rather
+        # than skipping it silently.
+        return [Stage("mydashboard", [], blocked=f"no local docs-site clone at {docs_site_root}")]
     return [
         Stage(
             "mydashboard",
@@ -525,6 +533,9 @@ def _execute_stage(stage: Stage, *, execute: bool) -> int:
     # this module's `_run` so the workspace-root cwd (and the test seam) hold.
     # Returns the stage's exit code so a failure can reach the cycle's outcome;
     # a skipped or dry-run stage did not fail, so both report 0.
+    if stage.blocked is not None:
+        print(f"({stage.name} blocked — {stage.blocked})")
+        return 1
     if stage.skip is not None:
         print(f"(skipping {stage.name} — {stage.skip})")
         return 0
