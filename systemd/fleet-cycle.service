@@ -16,6 +16,14 @@ OnFailure=telegram-alert@%n.service
 
 [Service]
 Type=oneshot
+# Type=oneshot defaults TimeoutStartSec to infinity, which is how a single
+# `accept --settle --ask-human` pass sat in activating(start) for 4h41m on
+# 2026-09-17. A timer will not re-trigger a service that is still active, so an
+# overrunning run leaves fleet-cycle.timer at `Trigger: n/a` -- no next run
+# scheduled at all. Below the 6h period, so a wedged tick is killed (and, via
+# OnFailure=, announced) before the one after it is due. The ask budget in
+# myfleet.accept bounds the known cause; this bounds the next one.
+TimeoutStartSec=5h
 User=lollinuxpi
 WorkingDirectory=/home/lollinuxpi/repos/MyThingsLab/my-fleet
 Environment=PATH=/home/lollinuxpi/repos/MyThingsLab/.venv/bin:/usr/bin:/bin

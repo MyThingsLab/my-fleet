@@ -58,6 +58,7 @@ import subprocess
 import sys
 import time
 import tomllib
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -421,15 +422,43 @@ def list_open_prs_in_org(org: str = ORG) -> list[tuple[str, int, str, bool]]:
     return res
 
 
+# Wall-clock ceiling for one settlement pass's asks, taken together.
+#
+# `fleet_ask.DEFAULT_ASK_TIMEOUT` already bounds a *single* ASK at 300s, and
+# that number is load-bearing: a human has to notice a phone notification and
+# answer. What it cannot bound is the pass. Asks here are serial, and an
+# unanswered one costs the full ceiling, so N untapped PRs cost N * 300s --
+# at the fleet's ~85 open PRs, ~7 hours against a timer that fires every 6.
+#
+# Overrunning the period is not merely slow. systemd will not re-trigger a
+# service that is still active, so the run that overruns leaves
+# `fleet-cycle.timer` reporting `Trigger: n/a` -- no next run scheduled at all
+# -- and every stage ordered after this one (the whole bookkeeping tail:
+# mydocs, mydashboard, myprojector, myreporter) is starved for as long as it
+# takes someone to notice. One quiet night takes the schedule down.
+#
+# An hour leaves the rest of a 6-hour period free. Exhausting it is a normal
+# outcome, not an error: nobody is obliged to be awake, the unasked PRs are
+# still open, and the next pass picks them up.
+DEFAULT_ASK_BUDGET = 3600.0
+
+
 def settle(
     *,
     execute: bool = False,
     ask_human: bool = False,
     ledger: object | None = None,
     repo_filter: list[str] | None = None,
+    ask_budget: float | None = DEFAULT_ASK_BUDGET,
+    clock: Callable[[], float] = time.monotonic,
 ) -> list[Assessment]:
     open_prs = list_open_prs_in_org(ORG)
     assessments: list[Assessment] = []
+    # Monotonic: a settlement pass can straddle an NTP step or a DST change,
+    # and a wall clock that jumps backwards would hand out budget that was
+    # already spent.
+    started = clock()
+    budget_spent = False
     guard = None
     if ask_human:
         try:
@@ -490,7 +519,12 @@ def settle(
                     )
         elif verdict is Verdict.NEEDS_HUMAN:
             approved = False
-            if ask_human and guard is not None:
+            if ask_human and guard is not None and ask_budget is not None:
+                # Checked before the ask, not after: the point is to not start
+                # an ask that could run 300s past the ceiling.
+                if clock() - started >= ask_budget:
+                    budget_spent = True
+            if ask_human and guard is not None and not budget_spent:
                 # `Action`, `Decision` and `MERGE_ACTION` come from the import
                 # above: a non-None `guard` is exactly the evidence that it
                 # succeeded, and they share this function's scope.
@@ -537,7 +571,16 @@ def settle(
                                 detail=assessment.reason,
                             )
             if not approved:
-                print(f"NEEDS_HUMAN: {repo}#{number} — {assessment.reason}")
+                # "Nobody answered" and "nobody was asked" are both NEEDS_HUMAN,
+                # but only the first is evidence about this PR. Keep the outcome
+                # value stable -- the Telegram digest filters on it -- and carry
+                # the distinction in `asked`, so a pass that ran out of budget
+                # cannot be misread as a human declining 40 PRs in a row.
+                asked = ask_human and guard is not None and not budget_spent
+                detail = assessment.reason
+                if ask_human and guard is not None and budget_spent:
+                    detail = f"{detail} (not asked: settle ask budget spent)"
+                print(f"NEEDS_HUMAN: {repo}#{number} — {detail}")
                 if ledger and hasattr(ledger, "record"):
                     ledger.record(
                         tool="fleet_accept",
@@ -545,8 +588,9 @@ def settle(
                         outcome="needs_human",
                         repo=repo,
                         pr=number,
-                        detail=assessment.reason,
+                        detail=detail,
                         failing_checks=failing_checks,
+                        asked=asked,
                     )
         else:
             print(f"REJECTED: {repo}#{number} — {assessment.reason}")
@@ -610,6 +654,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--ask-human", action="store_true", help="route needs_human PRs to Telegram ask channel"
     )
+    parser.add_argument(
+        "--ask-budget",
+        type=float,
+        default=DEFAULT_ASK_BUDGET,
+        help=(
+            "wall-clock seconds this pass may spend on asks in total "
+            f"(default: {DEFAULT_ASK_BUDGET:.0f}; 0 disables asking, "
+            "negative means unbounded -- the pre-#131 behaviour)"
+        ),
+    )
     args = parser.parse_args(argv)
 
     if args.settle:
@@ -622,6 +676,7 @@ def main(argv: list[str] | None = None) -> int:
             ask_human=args.ask_human,
             ledger=ledger,
             repo_filter=args.repo,
+            ask_budget=None if args.ask_budget < 0 else args.ask_budget,
         )
         return 0 if all(a.verdict is Verdict.ACCEPTED for a in assessments) else 1
 
