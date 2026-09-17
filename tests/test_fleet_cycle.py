@@ -150,14 +150,27 @@ def test_mytester_stage_stays_local_only_even_under_execute(
     assert all("--local-only" in cmd for cmd in tester_calls)
 
 
-def test_main_skips_mydashboard_when_docs_site_clone_missing(
+def test_main_fails_mydashboard_and_mydocs_when_docs_site_clone_missing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    # Regression test for #130: a missing docs-site clone used to be reported
+    # as a skip, indistinguishable in the log/ledger from a healthy no-op, and
+    # both stages silently no-op'd every cycle for weeks. It must now fail the
+    # cycle instead.
     calls = _capture_runs(monkeypatch)
+    ledger_path = tmp_path / "ledger.jsonl"
+    monkeypatch.setattr(fc, "DISPATCH_LEDGER", ledger_path)
     monkeypatch.setattr(fc, "WORKSPACE_ROOT", tmp_path)
-    fc.main(["--accounts", "/tmp/acct", "--skip-dispatch", "--execute", "--brief-count", "0"])
+    rc = fc.main(["--accounts", "/tmp/acct", "--skip-dispatch", "--execute", "--brief-count", "0"])
     assert not any(cmd[0] == "mydashboard" for cmd, _ in calls)
-    assert "skipping mydashboard" in capsys.readouterr().out
+    assert not any(cmd[0] == "mydocs" for cmd, _ in calls)
+    out = capsys.readouterr().out
+    assert "mydashboard blocked — no local docs-site clone" in out
+    assert "mydocs blocked — no local docs-site clone" in out
+    assert rc == 1
+    entries = fc.Ledger(ledger_path).read(tool="fleet_cycle", kind="cycle")
+    assert [e.outcome for e in entries] == ["stage_failed"]
+    assert set(entries[0].data.get("failed_stages", [])) == {"mydashboard", "mydocs"}
 
 
 def test_cycle_stage_order_follows_the_graph_plan(
@@ -1025,6 +1038,11 @@ def _failing_stage_cycle(
     monkeypatch.setattr(fc, "_run", fake_run)
     monkeypatch.setattr(fc, "DISPATCH_LEDGER", ledger_path)
     monkeypatch.setattr(fc, "WORKSPACE_ROOT", tmp_path)
+    # These tests are about a tool's own exit code reaching the cycle's outcome,
+    # not about the docs-site clone precondition (#130) -- keep that satisfied
+    # so mydocs/mydashboard don't also show up as blocked stages here.
+    (tmp_path / fc.DOCS_SITE_CLONE).mkdir()
+    monkeypatch.setattr(fc.shutil, "which", lambda name: f"/usr/bin/{name}")
     argv = ["--accounts", "/tmp/acct", "--skip-dispatch", "--execute", "--brief-count", "0"]
     rc = fc.main([*argv, "-j", str(concurrency)])
     return rc, fc.Ledger(ledger_path).read(tool="fleet_cycle", kind="cycle")
@@ -1122,6 +1140,38 @@ def test_docs_stage_skips_when_mydocs_is_not_installed(
     assert len(stages) == 1
     assert stages[0].skip is not None
     assert "not installed" in stages[0].skip
+
+
+def test_docs_stage_is_blocked_not_skipped_when_clone_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(fc, "WORKSPACE_ROOT", tmp_path)
+
+    ctx = fc._Ctx(
+        args=SimpleNamespace(engine="noop"), accounts="/tmp/acct", skip_dispatch=True, py="python3"
+    )
+    stages = fc._stage_docs(ctx)
+
+    assert len(stages) == 1
+    assert stages[0].skip is None
+    assert stages[0].blocked is not None
+    assert "no local docs-site clone" in stages[0].blocked
+
+
+def test_dashboard_stage_is_blocked_not_skipped_when_clone_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(fc, "WORKSPACE_ROOT", tmp_path)
+
+    ctx = fc._Ctx(
+        args=SimpleNamespace(engine="noop"), accounts="/tmp/acct", skip_dispatch=True, py="python3"
+    )
+    stages = fc._stage_dashboard(ctx)
+
+    assert len(stages) == 1
+    assert stages[0].skip is None
+    assert stages[0].blocked is not None
+    assert "no local docs-site clone" in stages[0].blocked
 
 
 def test_stage_dispatch_passes_provider() -> None:
