@@ -495,3 +495,101 @@ class TestSettle:
         assert len(ledger.records) == 1
         assert ledger.records[0]["outcome"] == "accepted"
 
+
+class _FakeLedger:
+    def __init__(self) -> None:
+        self.records: list[dict] = []
+
+    def record(self, **kwargs) -> None:
+        self.records.append(kwargs)
+
+
+# `pr_count` NEEDS_HUMAN PRs and a guard whose every ask goes unanswered,
+# costing the full 300s fleet_ask timeout. Returns the numbers actually asked
+# about and the fake clock those asks advance.
+def _unanswered_ask_setup(monkeypatch: pytest.MonkeyPatch, pr_count: int):
+    from mythings.policy import Decision
+
+    prs = [("my-fleet", n, f"chore: bump {n}", False) for n in range(1, pr_count + 1)]
+    monkeypatch.setattr("myfleet.accept.list_open_prs_in_org", lambda org: prs)
+    monkeypatch.setattr(
+        "myfleet.accept.assess",
+        lambda repo, num: _assessment(Check("b", None, "could not tell")),
+    )
+
+    now = [0.0]
+    asked: list[int] = []
+
+    class FakeResult:
+        def under(self, *, unattended: bool) -> Decision:
+            return Decision.DENY
+
+    class FakeGuard:
+        def evaluate(self, action):
+            asked.append(action.payload["number"])
+            # An ask nobody answers costs the full fleet_ask timeout.
+            now[0] += 300.0
+            return FakeResult()
+
+    monkeypatch.setattr("myguard.Guard", FakeGuard)
+    return asked, lambda: now[0]
+
+
+class TestSettleAskBudget:
+    def test_budget_stops_asking_but_still_reports(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from myfleet.accept import settle
+
+        asked, clock = _unanswered_ask_setup(monkeypatch, 3)
+        ledger = _FakeLedger()
+
+        settle(ask_human=True, ledger=ledger, ask_budget=600.0, clock=clock)
+
+        # Two asks fit in 600s; the third is not started, because starting it
+        # would carry the pass 300s past the ceiling.
+        assert asked == [1, 2]
+        # Every PR is still assessed and recorded -- the budget bounds the
+        # asking, not the pass.
+        assert [r["pr"] for r in ledger.records] == [1, 2, 3]
+        assert {r["outcome"] for r in ledger.records} == {"needs_human"}
+        assert [r["asked"] for r in ledger.records] == [True, True, False]
+        assert "budget spent" in ledger.records[2]["detail"]
+        assert "budget spent" not in ledger.records[0]["detail"]
+
+    def test_none_budget_is_unbounded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from myfleet.accept import settle
+
+        asked, clock = _unanswered_ask_setup(monkeypatch, 3)
+        ledger = _FakeLedger()
+
+        settle(ask_human=True, ledger=ledger, ask_budget=None, clock=clock)
+
+        assert asked == [1, 2, 3]
+        assert all(r["asked"] for r in ledger.records)
+
+    def test_zero_budget_asks_nobody(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from myfleet.accept import settle
+
+        asked, clock = _unanswered_ask_setup(monkeypatch, 3)
+        ledger = _FakeLedger()
+
+        settle(ask_human=True, ledger=ledger, ask_budget=0.0, clock=clock)
+
+        assert asked == []
+        assert not any(r["asked"] for r in ledger.records)
+
+    def test_without_ask_human_nothing_is_asked_and_no_budget_note(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from myfleet.accept import settle
+
+        asked, clock = _unanswered_ask_setup(monkeypatch, 2)
+        ledger = _FakeLedger()
+
+        settle(ask_human=False, ledger=ledger, clock=clock)
+
+        assert asked == []
+        # `asked=False` here means "asking was off", and the detail must not
+        # claim a budget ran out -- there was no budget in play.
+        assert not any(r["asked"] for r in ledger.records)
+        assert not any("budget spent" in r["detail"] for r in ledger.records)
+
