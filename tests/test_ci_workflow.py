@@ -30,3 +30,24 @@ def test_pull_request_trigger_has_no_base_branch_filter() -> None:
 
 def test_push_trigger_still_scoped_to_main() -> None:
     assert "branches: [main]" in _trigger_block("push")
+
+
+def test_checkout_fetches_full_history_for_the_changed_files_diff() -> None:
+    # The `Check changed files` step decides whether this job tests anything at
+    # all, and it diffs against a base SHA a shallow clone does not have. With
+    # the default fetch-depth that diff failed on every run and the job skipped
+    # Install, Ruff and Tests while still reporting `success` -- so the one
+    # check branch protection requires, and the only evidence `myfleet.accept`
+    # is allowed to read, was green without running.
+    text = CI_YML.read_text(encoding="utf-8")
+    assert "fetch-depth: 0" in text
+
+
+def test_an_unresolvable_diff_runs_the_job_rather_than_skipping_it() -> None:
+    # Fail closed. `|| true` on the diff itself turned "I could not tell what
+    # changed" into "nothing changed", which is the cheap answer and the unsafe
+    # one at the same time. A force-push or a GC'd base SHA can still make the
+    # diff unresolvable with full history, so the handling has to be explicit.
+    text = CI_YML.read_text(encoding="utf-8")
+    assert "if ! DIFF=$(git diff --name-only" in text
+    assert 'git diff --name-only "$BASE" "$HEAD" | grep' not in text
