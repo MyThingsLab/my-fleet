@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+### Added/Changed
+- Active worker blackboard for concurrent agent coordination (closes #70)
+- Add myfleet.coding_cycle autonomous engineering and TDD loop driver
+### Fixed
+- Float my-things-core on main in CI to match my-orchestrator dependency on mythings.labels
+- Expand merge gate carve-outs to cover AGENTS/GEMINI instructions and cycle/driver/preflight controls
+- rebase onto main, resolve test conflict, and fix ruff lints in accept.py
+- repoint TRACKING_REPO and TRACKING_ISSUE to my-fleet#121
+- fix ci.yml fetch-depth and my-guard ref to @main
+
 All notable changes to `my-fleet` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [semver](https://semver.org/), per the rules in `RELEASE.md`.
