@@ -49,7 +49,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from mythings._harness import harness_text
+from mythings.instructions import harness_text
 from mythings.ledger import Ledger
 
 from myfleet.workspace import fleet_root, ledger_path
