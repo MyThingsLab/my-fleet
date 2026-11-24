@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import ast
+import json
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -181,7 +182,7 @@ class Pair:
     their_helpers: list[str]
 
 
-def prompt(cand: Candidate, pair: Pair, sites: Sequence[str]) -> str:
+def prompt(cand: Candidate, pair: Pair, sites: Sequence[str], question: str = QUESTION) -> str:
     listed = "\n\n".join(sites) or "(nothing in this repository uses it)"
     return "\n\n".join(
         [
@@ -195,14 +196,14 @@ def prompt(cand: Candidate, pair: Pair, sites: Sequence[str]) -> str:
             "\n\n".join(pair.their_helpers) or "(none)",
             f"Every place in the tool that uses `{cand.local}`, with the function around it:",
             listed,
-            QUESTION.replace("{local}", cand.local).replace("{target}", cand.target),
+            question.replace("{local}", cand.local).replace("{target}", cand.target),
         ]
     )
 
 
-def judge(engine: Engine, text: str) -> tuple[bool, str]:
+def judge(engine: Engine, text: str, system: str = SYSTEM) -> tuple[bool, str]:
     request = EngineRequest(
-        prompt=text, system=SYSTEM, schema=VERDICT, context={"tool": "local_lane", "task": "adopt"}
+        prompt=text, system=system, schema=VERDICT, context={"tool": "local_lane", "task": "adopt"}
     )
     result = engine.run(request)
     reply = parse_json_object(result.text)
@@ -228,11 +229,34 @@ def adopt(source: str, node: ast.FunctionDef, local: str, target: str) -> str:
     return "".join(lines).rstrip("\n") + "\n"
 
 
+TUNED = (
+    Path.home() / ".local" / "share" / "mythingslab" / "optimizer" / "lane" / "adopt-prompt.json"
+)
+
+
+def tuned(path: Path = TUNED) -> tuple[str, str]:
+    # The system text and instruction myoptimizer.lane_adopt published, when it found a better
+    # pair (higher on held-out questions, no more wrong yes); the built-in ones otherwise. An
+    # instruction that lost a placeholder would ask about no function at all, so it is refused.
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return SYSTEM, QUESTION
+    system, question = data.get("system"), data.get("instruction")
+    if not (isinstance(system, str) and isinstance(question, str)):
+        return SYSTEM, QUESTION
+    if "{local}" not in question or "{target}" not in question:
+        return SYSTEM, QUESTION
+    return system, question
+
+
 @dataclass
 class Coder:
     engine: Engine
     core: Path
     decided: list[tuple[Candidate, bool, str]]
+    system: str = SYSTEM
+    question: str = QUESTION
 
     def apply(self, tree: Path, cands: Sequence[Candidate]) -> list[str]:
         changed = []
@@ -258,11 +282,11 @@ class Coder:
             _segment(core_source, theirs),
             helpers(core_source, theirs),
         )
-        text = prompt(cand, pair, uses(tree, cand.local))
-        if approx_tokens(SYSTEM + text) > num_ctx() - REPLY_TOKENS:
+        text = prompt(cand, pair, uses(tree, cand.local), self.question)
+        if approx_tokens(self.system + text) > num_ctx() - REPLY_TOKENS:
             self.decided.append((cand, False, "the question does not fit the model's context"))
             return None
-        yes, reason = judge(self.engine, text)
+        yes, reason = judge(self.engine, text, self.system)
         self.decided.append((cand, yes, reason))
         if not yes:
             return None

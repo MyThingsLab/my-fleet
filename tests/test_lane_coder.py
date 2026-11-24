@@ -216,3 +216,27 @@ def test_a_use_as_a_value_and_a_module_level_use_are_shown_too(tmp_path: Path) -
         "src/m.py:5:\ndef run(runner=_gh):\n    return runner(['x'])",
         "src/m.py:9: DEFAULT = _gh",
     ]
+
+
+def test_a_published_prompt_is_used_and_a_broken_one_is_refused(tmp_path: Path) -> None:
+    path = tmp_path / "adopt-prompt.json"
+    assert lane_coder.tuned(path) == (lane_coder.SYSTEM, lane_coder.QUESTION)
+
+    path.write_text(
+        json.dumps({"system": "Be strict.", "instruction": "Can `{local}` go for `{target}`?"})
+    )
+    assert lane_coder.tuned(path) == ("Be strict.", "Can `{local}` go for `{target}`?")
+
+    path.write_text(json.dumps({"system": "Be strict.", "instruction": "Can it go?"}))
+    assert lane_coder.tuned(path) == (lane_coder.SYSTEM, lane_coder.QUESTION)
+
+
+def test_the_coder_asks_with_the_prompt_it_was_given(tmp_path: Path) -> None:
+    tree = _tool(tmp_path)
+    engine = ScriptedEngine(_NO)
+    coder = lane_coder.Coder(engine, _core(tmp_path / "core"), [], "Be strict.", "Swap `{local}`?")
+
+    coder.apply(tree, [_CAND])
+
+    (asked,) = engine.calls
+    assert asked.system == "Be strict." and asked.prompt.endswith("Swap `_parse_json_object`?")

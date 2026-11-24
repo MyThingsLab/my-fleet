@@ -274,7 +274,8 @@ def _adopt_core(args: argparse.Namespace, lab: Path, ledger: Ledger) -> None:
 
     found = gaps.find(args.core, gaps.lab_repos(lab, args.core))
     by_repo = lane_coder.candidates(found)
-    coder = lane_coder.Coder(lane_coder.engine(args.traces), args.core, [])
+    system, question = lane_coder.tuned()
+    coder = lane_coder.Coder(lane_coder.engine(args.traces), args.core, [], system, question)
     for name, cands in by_repo.items():
         if args.repos is not None and name not in args.repos:
             continue
