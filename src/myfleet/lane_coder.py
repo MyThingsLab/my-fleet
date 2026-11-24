@@ -40,6 +40,17 @@ SYSTEM = (
     "You review Python code. You answer only from the code shown, and you say no when the code "
     "shown does not settle the question."
 )
+# The instruction every question ends with; myoptimizer.lane_adopt tunes it on the lane's
+# labelled questions, so it is one string with the two names as placeholders.
+QUESTION = (
+    "Could `{local}` be deleted and `{target}` imported in its place, under the name `{local}`, "
+    "with every use above still correct? It must take the same arguments, and for each use give "
+    "what the caller relies on: an extra input the library accepts is fine, one the caller "
+    "relies on that it rejects is not. If the two return different types (a list and a set, "
+    "say), the answer is yes only if every caller shown would behave the same, including the "
+    "order and repeats of items. Give the reason first, naming the input where they differ if "
+    "they do."
+)
 VERDICT = {
     "type": "object",
     "required": ["reason", "replaceable"],
@@ -184,13 +195,7 @@ def prompt(cand: Candidate, pair: Pair, sites: Sequence[str]) -> str:
             "\n\n".join(pair.their_helpers) or "(none)",
             f"Every place in the tool that uses `{cand.local}`, with the function around it:",
             listed,
-            f"Could `{cand.local}` be deleted and `{cand.target}` imported in its place, under "
-            f"the name `{cand.local}`, with every use above still correct? It must take the "
-            "same arguments, and for each use give what the caller relies on: an extra input "
-            "the library accepts is fine, one the caller relies on that it rejects is not. If "
-            "the two return different types (a list and a set, say), the answer is yes only if "
-            "every caller shown would behave the same, including the order and repeats of "
-            "items. Give the reason first, naming the input where they differ if they do.",
+            QUESTION.replace("{local}", cand.local).replace("{target}", cand.target),
         ]
     )
 
