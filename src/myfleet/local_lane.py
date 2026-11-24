@@ -9,12 +9,14 @@
 # change passes when no test that passed before fails after. Mains are not always green (a stale
 # HARNESS.md fails its drift test), and "every test passes" would refuse every change there.
 #
-# The first task is mechanical: tools importing a private core name that now has a public one
-# (mythings.gaps.PUBLIC) are moved to it by mythings.gaps.rewrite, with no model call.
+# A task is what edits the tree. `public-names` is mechanical: tools importing a private core
+# name that now has a public one (mythings.gaps.PUBLIC) are moved to it by mythings.gaps.rewrite,
+# with no model call. `adopt-core` replaces a tool's copy of a core function with core's, when a
+# local model judges the two interchangeable for the tool's callers (myfleet.lane_coder).
 #
 #     python -m myfleet.local_lane --core PATH                 # dry run: what would change where
 #     python -m myfleet.local_lane --core PATH --execute       # change, gate, commit locally
-#     python -m myfleet.local_lane --core PATH --repos my-todo --execute
+#     python -m myfleet.local_lane --core PATH --task adopt-core --repos my-todo --execute
 from __future__ import annotations
 
 import argparse
@@ -32,8 +34,6 @@ from mythings.ledger import Ledger
 from myfleet.workspace import fleet_root, ledger_path
 
 TOOL = "local_lane"
-TASK = "public-core-names"
-BRANCH = f"lane/{TASK}"
 SUITE_SECONDS = 900
 _REPORTED = re.compile(r"^(FAILED|ERROR) (\S+)")
 
@@ -44,6 +44,18 @@ Run = Callable[..., subprocess.CompletedProcess[str]]
 class Suite:
     failed: frozenset[str]  # node ids that failed or errored, plus "<collection>" when it broke
     code: int
+
+
+@dataclass(frozen=True)
+class Task:
+    name: str
+    subject: str  # the commit's subject line
+    how: Callable[[], str]  # what made the change, for the commit's body, once it is made
+    apply: Callable[[Path], list[str]]  # edits a checkout; the paths it changed
+
+    @property
+    def branch(self) -> str:
+        return f"lane/{self.name}"
 
 
 @dataclass(frozen=True)
@@ -135,25 +147,22 @@ def run_suite(tree: Path, core: Path, *, run: Run = subprocess.run) -> Suite:
     return parse_suite(proc.stdout, proc.returncode)
 
 
-def _sort_imports(tree: Path, files: Sequence[str], run: Run) -> None:
-    # Only the import blocks of the files the rewrite touched, so the diff stays the rewrite.
+def _tidy_imports(tree: Path, files: Sequence[str], run: Run) -> None:
+    # Sort the import blocks and drop the imports an edit left unused, in the files it touched
+    # only, so the diff stays the edit.
     ruff = paths.lab_python().parent / "ruff"
-    run([str(ruff), "check", "--select", "I", "--fix", "-q", *files], cwd=tree, check=False)
+    argv = [str(ruff), "check", "--select", "I,F401", "--fix", "-q", *files]
+    run(argv, cwd=tree, check=False)
 
 
-def _commit(tree: Path, files: Sequence[str], core: Path, run: Run) -> str:
+def _commit(tree: Path, files: Sequence[str], core: Path, task: Task, run: Run) -> str:
     # Commit through the repository's own hooks, never around them; why they refused, or "".
     _git(tree, "add", "--", *files, run=run)
-    moved = ", ".join(f"{old} -> {new}" for old, new in gaps.PUBLIC.items())
+    harness = "HARNESS.md re-vendored from my-things-core's harness.md.\n"
     message = (
-        "Import core's public names instead of its private ones\n\n"
-        f"{moved}.\n"
-        + (
-            "HARNESS.md re-vendored from my-things-core's harness.md.\n"
-            if "HARNESS.md" in files
-            else ""
-        )
-        + "Made by myfleet.local_lane (mythings.gaps.rewrite), gated on this repository's suite.\n"
+        f"{task.subject}\n\n{task.how()}\n"
+        + (harness if "HARNESS.md" in files else "")
+        + "Made by myfleet.local_lane, gated on this repository's suite.\n"
     )
     argv = ["git", "-C", str(tree), "commit", "-q", "-m", message]
     proc = run(argv, env=_env(tree, core), capture_output=True, text=True, check=False)
@@ -167,40 +176,52 @@ def _commit(tree: Path, files: Sequence[str], core: Path, run: Run) -> str:
     return said[-1] if said else f"git commit exited {proc.returncode}"
 
 
-def change_one(repo: Path, core: Path, *, run: Run = subprocess.run) -> Outcome:
-    if _has_branch(repo, BRANCH):
-        return Outcome(repo.name, "skipped", f"{BRANCH} already waits for review")
+_MOVED = ", ".join(f"{old} -> {new}" for old, new in gaps.PUBLIC.items())
+PUBLIC_NAMES = Task(
+    name="public-core-names",
+    subject="Import core's public names instead of its private ones",
+    how=lambda: f"{_MOVED} (mythings.gaps.rewrite).",
+    apply=rewrite_tree,
+)
+BRANCH = PUBLIC_NAMES.branch
+
+
+def change_one(
+    repo: Path, core: Path, task: Task = PUBLIC_NAMES, *, run: Run = subprocess.run
+) -> Outcome:
+    if _has_branch(repo, task.branch):
+        return Outcome(repo.name, "skipped", f"{task.branch} already waits for review")
     if not _has_branch(repo, "main"):
         return Outcome(repo.name, "skipped", "no local main to start from")
-    tree = repo / ".claude" / "worktrees" / f"lane-{TASK}"
-    _git(repo, "worktree", "add", "-q", str(tree), "-b", BRANCH, "main", run=run)
+    tree = repo / ".claude" / "worktrees" / f"lane-{task.name}"
+    _git(repo, "worktree", "add", "-q", str(tree), "-b", task.branch, "main", run=run)
     keep = False
     try:
-        outcome = _gated(repo, tree, core, run)
+        outcome = _gated(repo, tree, core, task, run)
         keep = outcome.outcome == "success"
         return outcome
     finally:
         _git(repo, "worktree", "remove", "--force", str(tree), run=run)
         if not keep:
-            _git(repo, "branch", "-D", BRANCH, run=run)
+            _git(repo, "branch", "-D", task.branch, run=run)
 
 
-def _gated(repo: Path, tree: Path, core: Path, run: Run) -> Outcome:
+def _gated(repo: Path, tree: Path, core: Path, task: Task, run: Run) -> Outcome:
     before = run_suite(tree, core, run=run)
-    files = rewrite_tree(tree)
+    files = task.apply(tree)
     if not files:
-        return Outcome(repo.name, "skipped", "main has nothing to move (the use is on a branch)")
-    _sort_imports(tree, files, run)
+        return Outcome(repo.name, "skipped", "nothing to change on main")
+    _tidy_imports(tree, files, run)
     files += revendor(tree)
     after = run_suite(tree, core, run=run)
     new = tuple(sorted(after.failed - before.failed))
     if new:
         detail = f"{len(new)} test(s) that passed on main fail after the change"
         return Outcome(repo.name, "failed", detail, tuple(files), new)
-    if refused := _commit(tree, files, core, run):
+    if refused := _commit(tree, files, core, task, run):
         return Outcome(repo.name, "failed", f"the commit hooks refused: {refused}", tuple(files))
     detail = (
-        f"{len(files)} file(s) on {BRANCH}; tests failing: {len(before.failed)} on main,"
+        f"{len(files)} file(s) on {task.branch}; tests failing: {len(before.failed)} on main,"
         f" {len(after.failed)} after"
     )
     return Outcome(repo.name, "success", detail, tuple(files))
@@ -222,35 +243,69 @@ def plan_one(repo: Path) -> Outcome:
     return Outcome(repo.name, "planned" if files else "skipped", detail, tuple(files))
 
 
+def _report(ledger: Ledger, task: Task, outcome: Outcome, execute: bool) -> None:
+    print(f"{outcome.repo}: {outcome.outcome}: {outcome.detail}")
+    for failure in outcome.new_failures[:5]:
+        print(f"  newly failing: {failure}")
+    if execute:
+        ledger.record(
+            TOOL,
+            "lane",
+            outcome.outcome,
+            outcome.detail,
+            repo=outcome.repo,
+            task=task.name,
+            branch=task.branch if outcome.outcome == "success" else "",
+            files=list(outcome.files),
+            new_failures=list(outcome.new_failures),
+        )
+
+
+def _public_names(args: argparse.Namespace, lab: Path, ledger: Ledger) -> None:
+    repos = targets(args.core, lab)
+    for name, path in repos.items():
+        if args.repos is None or name in args.repos:
+            outcome = change_one(path, args.core) if args.execute else plan_one(path)
+            _report(ledger, PUBLIC_NAMES, outcome, args.execute)
+
+
+def _adopt_core(args: argparse.Namespace, lab: Path, ledger: Ledger) -> None:
+    from myfleet import lane_coder
+
+    found = gaps.find(args.core, gaps.lab_repos(lab, args.core))
+    by_repo = lane_coder.candidates(found)
+    coder = lane_coder.Coder(lane_coder.engine(args.traces), args.core, [])
+    for name, cands in by_repo.items():
+        if args.repos is not None and name not in args.repos:
+            continue
+        if not args.execute:
+            listed = ", ".join(f"{c.local} -> {c.target}" for c in cands)
+            print(f"{name}: planned: would ask about {listed}")
+            continue
+        task = lane_coder.task(coder, cands)
+        _report(ledger, task, change_one(lab / name, args.core, task), True)
+    for cand, yes, reason in coder.decided:
+        print(f"  {cand.repo} {cand.local}: {'yes' if yes else 'no'}: {reason[:160]}")
+        ledger.record(TOOL, "verdict", "yes" if yes else "no", reason, **vars(cand))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m myfleet.local_lane")
     parser.add_argument("--core", type=Path, required=True, help="the core checkout to test on")
     parser.add_argument("--lab", type=Path, default=None, help="the lab root (default: atlas)")
     parser.add_argument("--repos", nargs="*", default=None, help="only these repositories")
+    parser.add_argument("--task", choices=("public-names", "adopt-core"), default="public-names")
+    parser.add_argument("--traces", type=Path, default=None, help="where the coder's calls go")
     parser.add_argument("--execute", action="store_true", help="change, gate and commit locally")
     args = parser.parse_args(argv)
     lab = args.lab or paths.lab()
-    repos = targets(args.core, lab)
-    if args.repos is not None:
-        repos = {name: path for name, path in repos.items() if name in args.repos}
-    ledger = Ledger(ledger_path(fleet_root(__file__)))
-    for path in repos.values():
-        outcome = change_one(path, args.core) if args.execute else plan_one(path)
-        print(f"{outcome.repo}: {outcome.outcome}: {outcome.detail}")
-        for failure in outcome.new_failures[:5]:
-            print(f"  newly failing: {failure}")
-        if args.execute:
-            ledger.record(
-                TOOL,
-                "lane",
-                outcome.outcome,
-                outcome.detail,
-                repo=outcome.repo,
-                task=TASK,
-                branch=BRANCH if outcome.outcome == "success" else "",
-                files=list(outcome.files),
-                new_failures=list(outcome.new_failures),
-            )
+    root = fleet_root(__file__)
+    ledger = Ledger(ledger_path(root))
+    args.traces = args.traces or Path.home() / ".local/share/mythingslab/fleet/lane-traces.jsonl"
+    if args.task == "public-names":
+        _public_names(args, lab, ledger)
+    else:
+        _adopt_core(args, lab, ledger)
     return 0
 
 
