@@ -9,7 +9,7 @@ description = "Fleet orchestration/ops tooling for the MyThingsLab tool fleet â€
 authors = [{ name = "Lorenzo Liuzzo", email = "lorenzoliuzzo@outlook.com" }]
 readme = "README.md"
 license = { text = "MIT" }
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 # my-things-core, my-orchestrator, my-guard, my-telegram-bot, my-pipeline,
 # my-coder are sibling repos, not on PyPI, and "my-telegram-bot" collides with
 # an unrelated real PyPI package of the same name. Do not list them here â€”
