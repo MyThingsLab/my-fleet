@@ -150,3 +150,16 @@ def test_the_command_runs_the_lane_on_each_repository_a_public_name_gap_names(
     assert capsys.readouterr().out.startswith("my-b: success: 1 file(s) on lane/public-core-names")
     (entry,) = Ledger(tmp_path / ".my-fleet" / "ledger.jsonl")
     assert (entry.tool, entry.outcome, entry.data["repo"]) == ("local_lane", "success", "my-b")
+
+
+def test_a_commit_hook_that_refuses_is_a_failed_change_not_a_crash(tmp_path: Path) -> None:
+    repo = _tool(tmp_path)
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\necho 'ruff found 3 errors'\nexit 1\n")
+    hook.chmod(0o755)
+
+    outcome = local_lane.change_one(repo, _core(tmp_path / "core"))
+
+    assert outcome.outcome == "failed"
+    assert outcome.detail == "the commit hooks refused: ruff found 3 errors"
+    assert local_lane.BRANCH not in _git(repo, "branch")

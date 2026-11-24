@@ -98,14 +98,21 @@ def parse_suite(output: str, code: int) -> Suite:
     return Suite(failed=frozenset(failed), code=code)
 
 
-def run_suite(tree: Path, core: Path, *, run: Run = subprocess.run) -> Suite:
-    # The repository's tests on this tree, importing the tree's own package and the given core
-    # first, with the lab's Python (it has every tool's dependencies installed).
-    env = {
+def _env(tree: Path, core: Path) -> dict[str, str]:
+    # The tree's own package and the given core imported first, with the lab's Python and its
+    # tools (pytest, ruff) first on PATH: the suite and the repository's commit hooks see the
+    # same code.
+    return {
         **os.environ,
+        "PATH": f"{paths.lab_python().parent}{os.pathsep}{os.environ.get('PATH', '')}",
         "PYTHONPATH": f"{tree / 'src'}{os.pathsep}{core / 'src'}",
         "PYTHONDONTWRITEBYTECODE": "1",
     }
+
+
+def run_suite(tree: Path, core: Path, *, run: Run = subprocess.run) -> Suite:
+    # The repository's tests on this tree, with the lab's Python (every tool's dependencies).
+    env = _env(tree, core)
     argv = [str(paths.lab_python()), "-m", "pytest", "-p", "no:cacheprovider", "-q", "-rfE"]
     try:
         proc = run(argv, cwd=tree, env=env, capture_output=True, text=True, timeout=SUITE_SECONDS)
@@ -120,7 +127,8 @@ def _sort_imports(tree: Path, files: Sequence[str], run: Run) -> None:
     run([str(ruff), "check", "--select", "I", "--fix", "-q", *files], cwd=tree, check=False)
 
 
-def _commit(tree: Path, files: Sequence[str], run: Run) -> None:
+def _commit(tree: Path, files: Sequence[str], core: Path, run: Run) -> str:
+    # Commit through the repository's own hooks, never around them; why they refused, or "".
     _git(tree, "add", "--", *files, run=run)
     moved = ", ".join(f"{old} -> {new}" for old, new in gaps.PUBLIC.items())
     message = (
@@ -128,7 +136,12 @@ def _commit(tree: Path, files: Sequence[str], run: Run) -> None:
         f"{moved}.\n"
         "Made by myfleet.local_lane (mythings.gaps.rewrite), gated on this repository's suite.\n"
     )
-    _git(tree, "commit", "-q", "-m", message, run=run)
+    argv = ["git", "-C", str(tree), "commit", "-q", "-m", message]
+    proc = run(argv, env=_env(tree, core), capture_output=True, text=True, check=False)
+    if proc.returncode == 0:
+        return ""
+    said = (proc.stdout + proc.stderr).strip().splitlines()
+    return said[-1] if said else f"git commit exited {proc.returncode}"
 
 
 def change_one(repo: Path, core: Path, *, run: Run = subprocess.run) -> Outcome:
@@ -160,7 +173,8 @@ def _gated(repo: Path, tree: Path, core: Path, run: Run) -> Outcome:
     if new:
         detail = f"{len(new)} test(s) that passed on main fail after the change"
         return Outcome(repo.name, "failed", detail, tuple(files), new)
-    _commit(tree, files, run)
+    if refused := _commit(tree, files, core, run):
+        return Outcome(repo.name, "failed", f"the commit hooks refused: {refused}", tuple(files))
     detail = f"{len(files)} file(s) on {BRANCH}; {len(before.failed)} failing before and after"
     return Outcome(repo.name, "success", detail, tuple(files))
 
