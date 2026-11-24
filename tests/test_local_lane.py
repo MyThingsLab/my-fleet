@@ -163,3 +163,39 @@ def test_a_commit_hook_that_refuses_is_a_failed_change_not_a_crash(tmp_path: Pat
     assert outcome.outcome == "failed"
     assert outcome.detail == "the commit hooks refused: ruff found 3 errors"
     assert local_lane.BRANCH not in _git(repo, "branch")
+
+
+def test_a_stale_harness_is_re_vendored_on_the_lane_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(local_lane, "harness_text", lambda: "# the rules\n")
+    repo = _tool(tmp_path, {"HARNESS.md": "# old rules\n"})
+
+    outcome = local_lane.change_one(repo, _core(tmp_path / "core"))
+
+    assert outcome.files == ("src/tool/ask.py", "HARNESS.md")
+    assert _git(repo, "show", f"{local_lane.BRANCH}:HARNESS.md") == "# the rules\n"
+    assert "HARNESS.md re-vendored" in _git(repo, "log", "-1", "--format=%B", local_lane.BRANCH)
+
+
+def test_a_repository_that_vendors_no_harness_or_a_current_one_is_left_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(local_lane, "harness_text", lambda: "# the rules\n")
+    assert local_lane.revendor(tmp_path) == []
+    (tmp_path / "HARNESS.md").write_text("# the rules\n")
+    assert local_lane.revendor(tmp_path) == []
+
+
+def test_a_refusing_hook_is_reported_by_the_test_it_failed(tmp_path: Path) -> None:
+    repo = _tool(tmp_path)
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    hook.write_text(
+        "#!/bin/sh\necho 'pytest....Failed'\necho 'FAILED tests/test_x.py::test_y'\n"
+        "echo 'secret scan....Passed'\nexit 1\n"
+    )
+    hook.chmod(0o755)
+
+    outcome = local_lane.change_one(repo, _core(tmp_path / "core"))
+
+    assert outcome.detail == "the commit hooks refused: FAILED tests/test_x.py::test_y"

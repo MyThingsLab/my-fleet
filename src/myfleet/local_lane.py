@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from mythings import gaps, paths
+from mythings.instructions import harness_text
 from mythings.ledger import Ledger
 
 from myfleet.workspace import fleet_root, ledger_path
@@ -91,6 +92,19 @@ def rewrite_tree(tree: Path) -> list[str]:
     return changed
 
 
+def revendor(tree: Path) -> list[str]:
+    # A HARNESS.md that is not core's harness.md fails the repository's drift test, so every
+    # commit hook on that main refuses. Re-vendoring it is the fix the September deploy made as
+    # one pull request per repository (58 of its accept checks); here it rides on the lane's
+    # branch. Only a repository that already vendors one is touched.
+    vendored = tree / "HARNESS.md"
+    canonical = harness_text()
+    if not vendored.is_file() or vendored.read_text(encoding="utf-8") == canonical:
+        return []
+    vendored.write_text(canonical, encoding="utf-8")
+    return ["HARNESS.md"]
+
+
 def parse_suite(output: str, code: int) -> Suite:
     failed = {m.group(2) for line in output.splitlines() if (m := _REPORTED.match(line))}
     if code not in (0, 1, 5):  # 2: interrupted, 3: internal error, 4: usage: nothing ran
@@ -134,13 +148,22 @@ def _commit(tree: Path, files: Sequence[str], core: Path, run: Run) -> str:
     message = (
         "Import core's public names instead of its private ones\n\n"
         f"{moved}.\n"
-        "Made by myfleet.local_lane (mythings.gaps.rewrite), gated on this repository's suite.\n"
+        + (
+            "HARNESS.md re-vendored from my-things-core's harness.md.\n"
+            if "HARNESS.md" in files
+            else ""
+        )
+        + "Made by myfleet.local_lane (mythings.gaps.rewrite), gated on this repository's suite.\n"
     )
     argv = ["git", "-C", str(tree), "commit", "-q", "-m", message]
     proc = run(argv, env=_env(tree, core), capture_output=True, text=True, check=False)
     if proc.returncode == 0:
         return ""
     said = (proc.stdout + proc.stderr).strip().splitlines()
+    # pre-commit prints every hook; the reason is the first FAILED test, else the failed hook.
+    for mark in ("FAILED ", "Failed"):
+        if hit := next((line.strip() for line in said if mark in line), None):
+            return hit
     return said[-1] if said else f"git commit exited {proc.returncode}"
 
 
@@ -168,6 +191,7 @@ def _gated(repo: Path, tree: Path, core: Path, run: Run) -> Outcome:
     if not files:
         return Outcome(repo.name, "skipped", "main has nothing to move (the use is on a branch)")
     _sort_imports(tree, files, run)
+    files += revendor(tree)
     after = run_suite(tree, core, run=run)
     new = tuple(sorted(after.failed - before.failed))
     if new:
