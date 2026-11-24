@@ -199,7 +199,10 @@ def _gated(repo: Path, tree: Path, core: Path, run: Run) -> Outcome:
         return Outcome(repo.name, "failed", detail, tuple(files), new)
     if refused := _commit(tree, files, core, run):
         return Outcome(repo.name, "failed", f"the commit hooks refused: {refused}", tuple(files))
-    detail = f"{len(files)} file(s) on {BRANCH}; {len(before.failed)} failing before and after"
+    detail = (
+        f"{len(files)} file(s) on {BRANCH}; tests failing: {len(before.failed)} on main,"
+        f" {len(after.failed)} after"
+    )
     return Outcome(repo.name, "success", detail, tuple(files))
 
 

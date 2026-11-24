@@ -86,7 +86,7 @@ def test_a_test_already_failing_on_main_does_not_block_the_change(tmp_path: Path
 
     outcome = local_lane.change_one(repo, _core(tmp_path / "core"))
 
-    assert outcome.outcome == "success" and "1 failing before and after" in outcome.detail
+    assert outcome.outcome == "success" and "tests failing: 1 on main, 1 after" in outcome.detail
 
 
 def test_a_branch_waiting_for_review_is_not_made_twice(tmp_path: Path) -> None:
