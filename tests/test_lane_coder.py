@@ -141,7 +141,10 @@ def test_the_prompt_holds_both_bodies_and_every_call_and_a_yes_makes_the_edit(
     assert asked.schema == lane_coder.VERDICT
     assert "value = json.loads(text)\n" in asked.prompt  # the tool's copy
     assert "        return {}" in asked.prompt  # core's
-    assert "src/tool/reader.py:14: return _parse_json_object(path.read_text())" in asked.prompt
+    assert (
+        "src/tool/reader.py:13:\ndef read(path: Path):\n    return _parse_json_object(path.read_text())"
+        in asked.prompt
+    )
     assert "def _parse_json_object" not in (tree / "src/tool/reader.py").read_text()
     assert coder.decided == [(_CAND, True, "same for a JSON object")]
 
@@ -184,3 +187,32 @@ def test_a_wrong_yes_is_caught_by_the_suite_and_leaves_no_branch(tmp_path: Path)
     assert outcome.outcome == "failed"
     assert outcome.new_failures == ("tests/test_reader.py::test_empty_text_is_no_object",)
     assert "lane/adopt-core" not in _git(repo, "branch")
+
+
+def test_the_helpers_a_function_uses_are_shown_whole_and_nothing_else() -> None:
+    source = (
+        "import re\n\n_WORD = re.compile(r'\\w+')\n_OTHER = 1\n\n\n"
+        "def _clean(text):\n    return text.strip()\n\n\n"
+        "def tokenize(text):\n    return set(_WORD.findall(_clean(text)))\n"
+    )
+    node = lane_coder.top_level_function(source, "tokenize")
+
+    assert lane_coder.helpers(source, node) == [
+        "_WORD = re.compile(r'\\w+')",
+        "def _clean(text):\n    return text.strip()",
+    ]
+
+
+def test_a_use_as_a_value_and_a_module_level_use_are_shown_too(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "m.py").write_text(
+        "def _gh(argv):\n    return ''\n\n\n"
+        "def run(runner=_gh):\n    return runner(['x'])\n\n\nDEFAULT = _gh\n"
+    )
+
+    shown = lane_coder.uses(tmp_path, "_gh")
+
+    assert shown == [
+        "src/m.py:5:\ndef run(runner=_gh):\n    return runner(['x'])",
+        "src/m.py:9: DEFAULT = _gh",
+    ]

@@ -23,6 +23,8 @@ from mythings.engine import (
     EngineRequest,
     OllamaEngine,
     TracingEngine,
+    approx_tokens,
+    num_ctx,
     parse_json_object,
 )
 from mythings.ledger import Ledger
@@ -30,7 +32,10 @@ from mythings.ledger import Ledger
 from myfleet.local_lane import Task
 
 MODEL = "qwen3.5:4b"
-CALL_SITES = 8
+USES = 6  # functions shown that use the copy
+USE_LINES = 40
+HELPERS = 6
+REPLY_TOKENS = 1024
 SYSTEM = (
     "You review Python code. You answer only from the code shown, and you say no when the code "
     "shown does not settle the question."
@@ -101,30 +106,91 @@ def _segment(source: str, node: ast.FunctionDef) -> str:
     return "".join(source.splitlines(keepends=True)[start - 1 : node.end_lineno]).rstrip()
 
 
-def call_sites(tree: Path, local: str, limit: int = CALL_SITES) -> list[str]:
-    sites = []
+def helpers(source: str, node: ast.FunctionDef) -> list[str]:
+    # The module-level definitions a function uses (`_strip_code_fence`, `_TOKEN_RE`), whole: a
+    # verdict on a body that calls something it cannot see is a guess.
+    tree = ast.parse(source)
+    used = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)} - {node.name}
+    found = []
+    for stmt in tree.body:
+        names = _defined(stmt)
+        if names & used:
+            found.append(ast.get_source_segment(source, stmt) or "")
+    return found[:HELPERS]
+
+
+def _defined(stmt: ast.stmt) -> set[str]:
+    if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return {stmt.name}
+    targets = stmt.targets if isinstance(stmt, ast.Assign) else []
+    if isinstance(stmt, ast.AnnAssign):
+        targets = [stmt.target]
+    return {n.id for t in targets for n in ast.walk(t) if isinstance(n, ast.Name)}
+
+
+def _enclosing(tree: ast.Module, line: int) -> ast.AST | None:
+    best = None
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.lineno <= line <= (node.end_lineno or node.lineno):
+                if best is None or node.lineno > best.lineno:
+                    best = node  # the innermost function around the use
+    return best
+
+
+def uses(tree: Path, local: str, limit: int = USES) -> list[str]:
+    # Every function of the tool that uses the copy, whole (a call, or the name passed as a value),
+    # so the model sees what each caller does with the result: whether it relies on its order.
+    shown: list[str] = []
     for path in sorted([*tree.glob("src/**/*.py"), *tree.glob("tests/**/*.py")]):
-        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            if f"{local}(" in line and not line.lstrip().startswith("def "):
-                sites.append(f"{path.relative_to(tree)}:{number}: {line.strip()}")
-    return sites[:limit]
+        source = path.read_text(encoding="utf-8")
+        module = ast.parse(source)
+        seen: set[int] = set()
+        names = [n for n in ast.walk(module) if isinstance(n, ast.Name) and n.id == local]
+        for name in sorted(names, key=lambda n: (n.lineno, n.col_offset)):
+            around = _enclosing(module, name.lineno)
+            if around is None or around.name == local or id(around) in seen:
+                if around is None:
+                    line = source.splitlines()[name.lineno - 1].strip()
+                    shown.append(f"{path.relative_to(tree)}:{name.lineno}: {line}")
+                continue
+            seen.add(id(around))
+            body = ast.get_source_segment(source, around) or ""
+            if len(body.splitlines()) > USE_LINES:
+                body = "\n".join(body.splitlines()[:USE_LINES] + ["    ..."])
+            shown.append(f"{path.relative_to(tree)}:{around.lineno}:\n{body}")
+    return shown[:limit]
 
 
-def prompt(cand: Candidate, mine: str, theirs: str, sites: Sequence[str]) -> str:
-    listed = "\n".join(sites) or "(no call in this repository)"
+@dataclass(frozen=True)
+class Pair:
+    mine: str
+    my_helpers: list[str]
+    theirs: str
+    their_helpers: list[str]
+
+
+def prompt(cand: Candidate, pair: Pair, sites: Sequence[str]) -> str:
+    listed = "\n\n".join(sites) or "(nothing in this repository uses it)"
     return "\n\n".join(
         [
             f"The tool has its own `{cand.local}`, in {cand.module}:",
-            mine,
+            pair.mine,
+            "The definitions it uses, from the same module:",
+            "\n\n".join(pair.my_helpers) or "(none)",
             f"The shared library has `{cand.target}`:",
-            theirs,
-            f"Every line of the tool that calls `{cand.local}`:",
+            pair.theirs,
+            "The definitions it uses, from the same library module:",
+            "\n\n".join(pair.their_helpers) or "(none)",
+            f"Every place in the tool that uses `{cand.local}`, with the function around it:",
             listed,
             f"Could `{cand.local}` be deleted and `{cand.target}` imported in its place, under "
-            f"the name `{cand.local}`, with every call above still correct? It must take the "
-            "same arguments, and for each call return what the caller expects: an extra value "
-            "the library accepts is fine, a value the caller relies on that it rejects is not. "
-            "Give the reason first, naming the input where they differ if they do.",
+            f"the name `{cand.local}`, with every use above still correct? It must take the "
+            "same arguments, and for each use give what the caller relies on: an extra input "
+            "the library accepts is fine, one the caller relies on that it rejects is not. If "
+            "the two return different types (a list and a set, say), the answer is yes only if "
+            "every caller shown would behave the same, including the order and repeats of "
+            "items. Give the reason first, naming the input where they differ if they do.",
         ]
     )
 
@@ -181,12 +247,16 @@ class Coder:
         theirs = top_level_function(core_source, cand.target.rsplit(".", 1)[1])
         if mine is None or theirs is None:
             return None
-        text = prompt(
-            cand,
+        pair = Pair(
             _segment(source, mine),
+            helpers(source, mine),
             _segment(core_source, theirs),
-            call_sites(tree, cand.local),
+            helpers(core_source, theirs),
         )
+        text = prompt(cand, pair, uses(tree, cand.local))
+        if approx_tokens(SYSTEM + text) > num_ctx() - REPLY_TOKENS:
+            self.decided.append((cand, False, "the question does not fit the model's context"))
+            return None
         yes, reason = judge(self.engine, text)
         self.decided.append((cand, yes, reason))
         if not yes:
