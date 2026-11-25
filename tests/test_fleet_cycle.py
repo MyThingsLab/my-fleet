@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1145,5 +1148,46 @@ def test_main_provider_flag_passed(monkeypatch: pytest.MonkeyPatch) -> None:
     rc = fc.main(["--accounts", "/tmp/acct", "--provider", "gemini"])
     assert rc == 0
     assert captured["provider"] == "gemini"
+
+
+def _lab_stage_prefixes() -> list[tuple[str, ...]]:
+    ctx = fc._Ctx(
+        args=SimpleNamespace(
+            engine="noop",
+            execute=False,
+            dispatch_execute=False,
+            allow_personal_token=False,
+            app_id=None,
+            app_installation_id=None,
+            app_private_key=None,
+            provider="claude",
+            ask_human=False,
+            brief_count=0,
+        ),
+        accounts="/tmp/acct",
+        skip_dispatch=False,
+        py=sys.executable,
+    )
+    prefixes: list[tuple[str, ...]] = []
+    for resolver in fc.RESOLVERS.values():
+        for stage in resolver(ctx):
+            if stage.skip is not None or stage.argv[0] == sys.executable:
+                continue
+            prefix = tuple(stage.argv[:2])
+            if prefix not in prefixes:
+                prefixes.append(prefix)
+    return prefixes
+
+
+@pytest.mark.parametrize("prefix", _lab_stage_prefixes(), ids=lambda p: " ".join(p))
+def test_every_lab_stage_subcommand_accepts_help(prefix: tuple[str, ...]) -> None:
+    venv_bin = Path(sys.executable).parent
+    if shutil.which(prefix[0], path=str(venv_bin)) is None:
+        pytest.skip(f"{prefix[0]} is not installed in {venv_bin}")
+    env = {**os.environ, "PATH": f"{venv_bin}{os.pathsep}{os.environ.get('PATH', '')}"}
+    result = subprocess.run(
+        [*prefix, "--help"], env=env, capture_output=True, text=True, timeout=60, check=False
+    )
+    assert result.returncode == 0, result.stderr
 
 
