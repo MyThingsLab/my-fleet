@@ -52,9 +52,7 @@ def make_repo_root(tmp_path: Path) -> tuple[Path, Path]:
 def run_reporter(*argv: str) -> subprocess.CompletedProcess[str]:
     if not MYREPORTER.exists():
         pytest.skip("myreporter is not installed in this environment")
-    return subprocess.run(
-        [str(MYREPORTER), *argv], capture_output=True, text=True, timeout=60
-    )
+    return subprocess.run([str(MYREPORTER), *argv], capture_output=True, text=True, timeout=60)
 
 
 def test_digest_reflects_a_real_sibling_ledger(tmp_path: Path) -> None:

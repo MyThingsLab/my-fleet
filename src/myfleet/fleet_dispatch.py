@@ -485,8 +485,8 @@ _TERMINAL_OUTCOMES = frozenset(
         "blocked",
         "needs_human",
         "paused",
-        # my-coder's "denied" (its Policy gate blocked the PR -- unreachable today since
-        # fleet_dispatch doesn't pass --guarded, but recorded honestly if that ever changes)
+        # my-coder's "denied" (a human on the ask channel refused the PR, when the
+        # channel is armed with --ask-human)
         # is "deny" in core's words, and "skipped" (the picked issue no longer exists, e.g.
         # already closed by someone else).
         "deny",
@@ -839,6 +839,12 @@ def _dispatch_one(
             str(TRANSCRIPTS_DIR),
             "--json",
         ]
+        # my-coder asks a human before opening a PR. With the ask channel armed
+        # (--ask-human), that human is asked; unarmed, nobody could answer and the
+        # paid session would end with no PR, so the dispatch opens it unasked, as it
+        # always has -- and says so in the argv.
+        if not env.get("MYTHINGS_ASK_CMD", "").strip():
+            argv.append("--unguarded")
         # A backstop above my-coder's own internal session timeout: git/test
         # overhead around the session itself isn't bounded by --session-timeout-s,
         # so this catches a genuinely stuck `mycoder build` process rather than
@@ -1401,8 +1407,9 @@ def main(argv: list[str] | None = None) -> int:
                                 f"(${spent_today:.2f} + ${args.max_budget_usd:.2f} > ${effective_cap:.2f})"
                             )
                             break
-                        if projected >= args.spend_alert_fraction * effective_cap and not _spend_alert_sent_today(
-                            dispatch_ledger
+                        if (
+                            projected >= args.spend_alert_fraction * effective_cap
+                            and not _spend_alert_sent_today(dispatch_ledger)
                         ):
                             raise_to = round(effective_cap * 1.5, 2)
                             sent = fleet_ask.alert_spend(

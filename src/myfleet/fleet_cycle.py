@@ -632,6 +632,7 @@ def _run_cycle(args: argparse.Namespace, *, accounts: str, skip_dispatch: bool, 
     has_accept = any(item.stage in ("fleet-accept", "accept") for w in waves for item in w)
     if not has_accept:
         from mypipeline.plan import PlanItem
+
         accept_item = PlanItem(node_id="accept", stage="fleet-accept", engine="none")
         new_waves = []
         for w in waves:
@@ -688,9 +689,7 @@ def _work_entry_count(ledger: Ledger) -> int:
     polling loop against the GitHub API (#105).
     """
     return sum(
-        1
-        for e in rows.read(ledger, "fleet_dispatch", "dispatch")
-        if e.outcome in WORK_OUTCOMES
+        1 for e in rows.read(ledger, "fleet_dispatch", "dispatch") if e.outcome in WORK_OUTCOMES
     )
 
 
@@ -802,9 +801,7 @@ def _run_loop(args: argparse.Namespace, py: str) -> int:
             if provider != "claude":
                 preflight_kw["provider"] = provider
                 usage_kw["provider"] = provider
-            live, blocked = preflight.select_accounts(
-                pool, WORKSPACE_ROOT, **preflight_kw
-            )
+            live, blocked = preflight.select_accounts(pool, WORKSPACE_ROOT, **preflight_kw)
             _record_preflight(dispatch_ledger, blocked)
             last_blocked = blocked
             usable, over = account_usage.select_accounts(
@@ -1020,9 +1017,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.dispatch_execute and not skip_dispatch:
         pool = [a.strip() for a in accounts.split(",") if a.strip()]
         preflight_kw = {"provider": args.provider} if args.provider != "claude" else {}
-        live, blocked = preflight.select_accounts(
-            pool, WORKSPACE_ROOT, **preflight_kw
-        )
+        live, blocked = preflight.select_accounts(pool, WORKSPACE_ROOT, **preflight_kw)
         _record_preflight(Ledger(DISPATCH_LEDGER), blocked)
         if not live:
             print(

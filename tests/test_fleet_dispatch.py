@@ -28,7 +28,6 @@ def _isolate_dispatch_ledger(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) ->
     monkeypatch.setattr(fd, "HALT_MARKER", tmp_path / "HALT")
 
 
-
 def _init_git_repo(path: Path) -> None:
     subprocess.run(["git", "-C", str(path), "init", "-q"], check=True)
     subprocess.run(["git", "-C", str(path), "config", "user.email", "t@t"], check=True)
@@ -394,7 +393,9 @@ def test_last_attempt_reads_latest_terminal_and_counts_attempts(tmp_path: Path) 
         final_message="stuck on ls",
     )
     rows.record(led, "fleet_dispatch", "dispatch", "started", candidate="r#1", branch="b")
-    rows.record(led, "fleet_dispatch", "dispatch", "needs_review", candidate="r#1", branch="b", commits=1)
+    rows.record(
+        led, "fleet_dispatch", "dispatch", "needs_review", candidate="r#1", branch="b", commits=1
+    )
     rows.record(led, "fleet_dispatch", "dispatch", "success", candidate="other#2", branch="b2")
 
     a = fd._last_attempt(led, "r#1")
@@ -1521,6 +1522,7 @@ def test_dispatch_one_dry_run_never_calls_mycoder(tmp_path: Path, monkeypatch) -
 
 def test_dispatch_one_builds_mycoder_argv(tmp_path: Path, monkeypatch) -> None:
     candidate, account, ledger = _setup_dispatch_one_repo(tmp_path, monkeypatch)
+    monkeypatch.delenv("MYTHINGS_ASK_CMD", raising=False)
     captured = {}
 
     def fake_run(argv, **kwargs):
@@ -1555,6 +1557,30 @@ def test_dispatch_one_builds_mycoder_argv(tmp_path: Path, monkeypatch) -> None:
     assert "--run-tests" in argv
     assert "--json" in argv
     assert captured["env"]["CLAUDE_CONFIG_DIR"] == str(account.config_dir)
+    # no ask channel armed: nobody could approve the PR, so it is opened unasked, by name
+    assert argv[-1] == "--unguarded"
+
+
+def test_dispatch_one_lets_mycoder_ask_when_the_channel_is_armed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    candidate, account, ledger = _setup_dispatch_one_repo(tmp_path, monkeypatch)
+    monkeypatch.setenv("MYTHINGS_ASK_CMD", "mytelegrambot ask")
+    captured = {}
+
+    def fake_run(argv, **kwargs):
+        if argv[0] == "mycoder":
+            captured["argv"] = argv
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=json.dumps({"outcome": "no_changes", "detail": "nothing to do"})
+            )
+        return _REAL_SUBPROCESS_RUN(argv, **kwargs)
+
+    monkeypatch.setattr(fd.subprocess, "run", fake_run)
+    fd._dispatch_one(account, candidate, execute=True, max_budget_usd=2.5, max_turns=15,
+                     ledger=ledger, org="MyThingsLab", session_timeout_s=900.0)  # fmt: skip
+
+    assert "--unguarded" not in captured["argv"]  # a human approves the PR
 
 
 @pytest.mark.parametrize(
@@ -2039,6 +2065,7 @@ def test_ensure_repo_graph_builds_and_caches(tmp_path: Path) -> None:
     assert meta["commit_sha"] == head_sha
 
     from mythings.graph import CodebaseGraph
+
     graph = CodebaseGraph(db_path)
     symbols = graph.find_symbols("do_work")
     assert len(symbols) == 1
@@ -2050,7 +2077,9 @@ def test_ensure_repo_graph_builds_and_caches(tmp_path: Path) -> None:
     assert db_path_cached == db_path
 
     # New commit updates cache
-    (pkg_dir / "worker.py").write_text("def do_work() -> int:\n    return 100\ndef new_fn(): pass\n")
+    (pkg_dir / "worker.py").write_text(
+        "def do_work() -> int:\n    return 100\ndef new_fn(): pass\n"
+    )
     subprocess.run(["git", "-C", str(repo_path), "add", "."], check=True)
     subprocess.run(["git", "-C", str(repo_path), "commit", "-qm", "update"], check=True)
     new_sha = subprocess.run(
@@ -2111,9 +2140,7 @@ def test_dispatch_one_injects_graph_path(tmp_path: Path, monkeypatch) -> None:
     assert graph_file.name == "graph.sqlite"
 
 
-def test_main_preserves_orchestrator_priority_order_over_lane(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_main_preserves_orchestrator_priority_order_over_lane(tmp_path: Path, monkeypatch) -> None:
     # Regression test for #104. `mythings.labels.sort_key` ranks prio above
     # lane, so the orchestrator hands back a product P0 ahead of a kernel P3.
     # A second sort keyed on lane in the dispatcher made lane primary again and
@@ -2179,9 +2206,30 @@ def test_pull_queue_fast_worker_pulls_multiple_candidates(tmp_path: Path, monkey
     monkeypatch.setattr(fd, "_last_attempt", lambda *a, **k: None)
 
     candidates = [
-        fd.Candidate(id="repoA#1", repo="repoA", tool="", title="t1", kind="issue", created_at="2026-09-13T20:00:00Z"),
-        fd.Candidate(id="repoB#2", repo="repoB", tool="", title="t2", kind="issue", created_at="2026-09-13T20:00:01Z"),
-        fd.Candidate(id="repoC#3", repo="repoC", tool="", title="t3", kind="issue", created_at="2026-09-13T20:00:02Z"),
+        fd.Candidate(
+            id="repoA#1",
+            repo="repoA",
+            tool="",
+            title="t1",
+            kind="issue",
+            created_at="2026-09-13T20:00:00Z",
+        ),
+        fd.Candidate(
+            id="repoB#2",
+            repo="repoB",
+            tool="",
+            title="t2",
+            kind="issue",
+            created_at="2026-09-13T20:00:01Z",
+        ),
+        fd.Candidate(
+            id="repoC#3",
+            repo="repoC",
+            tool="",
+            title="t3",
+            kind="issue",
+            created_at="2026-09-13T20:00:02Z",
+        ),
     ]
 
     class FakeRecommendation:
@@ -2226,8 +2274,22 @@ def test_pull_queue_respects_repo_leases(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(fd, "_last_attempt", lambda *a, **k: None)
 
     candidates = [
-        fd.Candidate(id="repoA#1", repo="repoA", tool="", title="t1", kind="issue", created_at="2026-09-13T20:00:00Z"),
-        fd.Candidate(id="repoA#2", repo="repoA", tool="", title="t2", kind="issue", created_at="2026-09-13T20:00:01Z"),
+        fd.Candidate(
+            id="repoA#1",
+            repo="repoA",
+            tool="",
+            title="t1",
+            kind="issue",
+            created_at="2026-09-13T20:00:00Z",
+        ),
+        fd.Candidate(
+            id="repoA#2",
+            repo="repoA",
+            tool="",
+            title="t2",
+            kind="issue",
+            created_at="2026-09-13T20:00:01Z",
+        ),
     ]
 
     class FakeRecommendation:
@@ -2288,8 +2350,13 @@ def test_ensure_repo_graph_rebuilds_when_the_extractor_version_moved(tmp_path: P
 def test_route_candidate_params() -> None:
     # Mechanical small task: size:S + kind:chore -> budget 1.0, turns 20
     cand_small = fd.Candidate(
-        id="repoA#1", repo="repoA", tool="", title="t1", kind="issue", created_at="2026-09-13T20:00:00Z",
-        labels=("size:S", "kind:chore")
+        id="repoA#1",
+        repo="repoA",
+        tool="",
+        title="t1",
+        kind="issue",
+        created_at="2026-09-13T20:00:00Z",
+        labels=("size:S", "kind:chore"),
     )
     provider, budget, turns = fd.route_candidate_params(cand_small)
     assert provider == "claude"
@@ -2298,8 +2365,13 @@ def test_route_candidate_params() -> None:
 
     # Complex / non-small task: size:M + kind:feat -> default budget 3.0, turns 40
     cand_large = fd.Candidate(
-        id="repoA#2", repo="repoA", tool="", title="t2", kind="issue", created_at="2026-09-13T20:00:00Z",
-        labels=("size:M", "kind:feat")
+        id="repoA#2",
+        repo="repoA",
+        tool="",
+        title="t2",
+        kind="issue",
+        created_at="2026-09-13T20:00:00Z",
+        labels=("size:M", "kind:feat"),
     )
     provider, budget, turns = fd.route_candidate_params(cand_large)
     assert budget == 3.0

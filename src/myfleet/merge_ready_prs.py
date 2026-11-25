@@ -330,7 +330,6 @@ def main(argv: list[str] | None = None) -> int:
             print(f"\ncannot ask: {exc}", file=sys.stderr)
             return 2
 
-
     if not args.execute:
         print(
             "\n(dry run — pass --execute to merge these here, or --ask to approve them from Telegram)"

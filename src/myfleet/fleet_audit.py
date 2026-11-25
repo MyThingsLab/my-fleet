@@ -178,9 +178,7 @@ def _audit_single_repo(repo_path: Path) -> RepoFindings:
 
     try:
         dead = graph.find_unreferenced_symbols()
-        findings.unreferenced_symbols = [
-            {"id": n.id, "path": n.path, "name": n.name} for n in dead
-        ]
+        findings.unreferenced_symbols = [{"id": n.id, "path": n.path, "name": n.name} for n in dead]
     except Exception as exc:
         findings.error = (findings.error or "") + f"; dead code detection failed: {exc}"
 
@@ -218,9 +216,7 @@ def _find_cross_repo_clones(repos: list[Path]) -> list[dict[str, Any]]:
                     "hash": c.hash_value,
                     "type": c.clone_type,
                     "repos": sorted(repo_names),
-                    "nodes": [
-                        {"id": n.id, "path": n.path, "name": n.name} for n in c.nodes
-                    ],
+                    "nodes": [{"id": n.id, "path": n.path, "name": n.name} for n in c.nodes],
                 }
             )
 
@@ -264,7 +260,9 @@ def _format_human(report: AuditReport) -> str:
     """Render the audit report as human-readable text."""
     lines: list[str] = []
     lines.append(f"Fleet Graph Audit — {report.timestamp}")
-    lines.append(f"Repos scanned: {report.repos_scanned}, with findings: {report.repos_with_findings}")
+    lines.append(
+        f"Repos scanned: {report.repos_scanned}, with findings: {report.repos_with_findings}"
+    )
     lines.append("")
 
     for r in report.per_repo:

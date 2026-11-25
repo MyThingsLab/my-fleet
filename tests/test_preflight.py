@@ -202,9 +202,7 @@ def test_gemini_preflight_success(tmp_path: Path, monkeypatch) -> None:
     config_dir = tmp_path / "gemini_config"
     config_dir.mkdir()
 
-    monkeypatch.setattr(
-        pf.subprocess, "run", lambda cmd, **kw: _completed(0, stdout="agy 0.1.0\n")
-    )
+    monkeypatch.setattr(pf.subprocess, "run", lambda cmd, **kw: _completed(0, stdout="agy 0.1.0\n"))
 
     result = pf.check_account(str(config_dir), workspace, provider="gemini")
     assert result.outcome == pf.OK
@@ -244,9 +242,7 @@ def test_main_with_gemini_provider(tmp_path: Path, monkeypatch, capsys) -> None:
     config_dir = tmp_path / "gemini_config"
     config_dir.mkdir()
 
-    monkeypatch.setattr(
-        pf.subprocess, "run", lambda cmd, **kw: _completed(0, stdout="agy 0.1.0\n")
-    )
+    monkeypatch.setattr(pf.subprocess, "run", lambda cmd, **kw: _completed(0, stdout="agy 0.1.0\n"))
 
     code = pf.main(
         [
@@ -261,4 +257,3 @@ def test_main_with_gemini_provider(tmp_path: Path, monkeypatch, capsys) -> None:
     captured = capsys.readouterr()
     assert code == 0
     assert captured.out.strip() == str(config_dir)
-
