@@ -23,9 +23,10 @@ from pathlib import Path
 from mytelegrambot.transport import HTTPTelegramTransport
 from mythings.ledger import Ledger
 
+from myfleet import rows
 from myfleet.workspace import fleet_root, ledger_path
 
-TOOL = "fleet_cycle"
+COMPONENT = "fleet_cycle"
 KIND = "heartbeat"
 
 # The switch's own memory of what it has already said. A stale tick is a
@@ -57,7 +58,7 @@ DEFAULT_MAX_AGE_MIN = {"build": 8 * 60.0, "bookkeeping": 30 * 60.0}
 
 
 def record(ledger: Ledger, tick: str) -> None:
-    ledger.record(tool=TOOL, kind=KIND, outcome="ok", detail=tick, tick=tick)
+    rows.record(ledger, COMPONENT, KIND, "ok", tick, tick=tick)
 
 
 def _parse_ts(ts: str) -> datetime:
@@ -66,7 +67,7 @@ def _parse_ts(ts: str) -> datetime:
 
 
 def last_heartbeat(ledger: Ledger, tick: str) -> datetime | None:
-    entries = [e for e in ledger.read(tool=TOOL, kind=KIND) if e.data.get("tick") == tick]
+    entries = [e for e in rows.read(ledger, COMPONENT, KIND) if e.data.get("tick") == tick]
     if not entries:
         return None
     return _parse_ts(entries[-1].ts)
@@ -74,10 +75,12 @@ def last_heartbeat(ledger: Ledger, tick: str) -> datetime | None:
 
 def last_alert(ledger: Ledger, tick: str) -> tuple[str, datetime] | None:
     """The most recent thing this switch said about `tick`, and when."""
-    entries = [e for e in ledger.read(tool=TOOL, kind=ALERT_KIND) if e.data.get("tick") == tick]
+    entries = [
+        e for e in rows.read(ledger, COMPONENT, ALERT_KIND) if e.data.get("tick") == tick
+    ]
     if not entries:
         return None
-    return entries[-1].outcome, _parse_ts(entries[-1].ts)
+    return rows.word_of(entries[-1]), _parse_ts(entries[-1].ts)
 
 
 def stale_ticks(
@@ -183,7 +186,7 @@ def main(argv: list[str] | None = None) -> int:
     # alert and suppress it for the whole re-alert window -- the switch would go
     # quiet about a dead fleet because it failed to say so once.
     for tick, state, _message in changes:
-        ledger.record(tool=TOOL, kind=ALERT_KIND, outcome=state, detail=tick, tick=tick)
+        rows.record(ledger, COMPONENT, ALERT_KIND, state, tick, tick=tick)
 
     for line in lines:
         print(line)

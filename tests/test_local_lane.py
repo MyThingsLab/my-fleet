@@ -149,7 +149,12 @@ def test_the_command_runs_the_lane_on_each_repository_a_public_name_gap_names(
     )
     assert capsys.readouterr().out.startswith("my-b: success: 1 file(s) on lane/public-core-names")
     (entry,) = Ledger(tmp_path / ".my-fleet" / "ledger.jsonl")
-    assert (entry.tool, entry.outcome, entry.data["repo"]) == ("local_lane", "success", "my-b")
+    assert (entry.tool, entry.outcome, entry.data["component"], entry.data["repo"]) == (
+        "my-fleet",
+        "success",
+        "local_lane",
+        "my-b",
+    )
 
 
 def test_a_commit_hook_that_refuses_is_a_failed_change_not_a_crash(tmp_path: Path) -> None:

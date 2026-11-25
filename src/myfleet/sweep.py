@@ -52,9 +52,10 @@ from pathlib import Path
 from mythings.instructions import harness_text
 from mythings.ledger import Ledger
 
+from myfleet import rows
 from myfleet.workspace import fleet_root, ledger_path
 
-TOOL = "fleet_sweep"
+COMPONENT = "fleet_sweep"
 KIND = "sweep"
 
 WORKSPACE_ROOT = fleet_root(__file__)
@@ -476,11 +477,12 @@ def main(argv: list[str] | None = None) -> int:
             "--allow-unchecked to open them anyway."
         )
 
-    Ledger(args.ledger).record(
-        tool=TOOL,
-        kind=KIND,
-        outcome="success" if not by_state.get("failed") else "failure",
-        detail=f"{transform.name}: " + ", ".join(f"{n} {s}" for s, n in counts.items()),
+    rows.record(
+        Ledger(args.ledger),
+        COMPONENT,
+        KIND,
+        "success" if not by_state.get("failed") else "failure",
+        f"{transform.name}: " + ", ".join(f"{n} {s}" for s, n in counts.items()),
         transform=transform.name,
         execute=args.execute,
         counts=counts,

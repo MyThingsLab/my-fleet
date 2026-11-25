@@ -30,6 +30,7 @@ from mythings.engine import (
 )
 from mythings.ledger import Ledger
 
+from myfleet import rows
 from myfleet.local_lane import Task
 
 MODEL = "qwen3.5:4b"
@@ -319,4 +320,4 @@ def engine(traces: Path) -> Engine:
         options={"temperature": 0, "seed": 0},
         busy=steward.busy("the local lane's coder"),
     )
-    return TracingEngine(CheckedEngine(model), Ledger(traces), tool="local_lane")
+    return TracingEngine(CheckedEngine(model), Ledger(traces), tool=rows.TOOL)

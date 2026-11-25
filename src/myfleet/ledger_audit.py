@@ -21,6 +21,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from myfleet import rows
 from myfleet.workspace import fleet_root, ledger_path
 
 WORKSPACE_ROOT = fleet_root(__file__)
@@ -103,7 +104,7 @@ def audit_ledger(path: Path | None = None) -> LedgerAuditResult:
             last_dispatch_ts=None,
         )
 
-    dispatch_entries = [e for e in entries if e.tool == "fleet_dispatch"]
+    dispatch_entries = [e for e in entries if rows.component_of(e) == "fleet_dispatch"]
     last_dispatch_ts = dispatch_entries[-1].ts if dispatch_entries else None
 
     anomalies: list[Anomaly] = []

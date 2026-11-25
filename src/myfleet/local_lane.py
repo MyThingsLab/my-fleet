@@ -31,9 +31,10 @@ from mythings import gaps, paths
 from mythings.instructions import harness_text
 from mythings.ledger import Ledger
 
+from myfleet import rows
 from myfleet.workspace import fleet_root, ledger_path
 
-TOOL = "local_lane"
+COMPONENT = "local_lane"
 SUITE_SECONDS = 900
 _REPORTED = re.compile(r"^(FAILED|ERROR) (\S+)")
 
@@ -248,8 +249,9 @@ def _report(ledger: Ledger, task: Task, outcome: Outcome, execute: bool) -> None
     for failure in outcome.new_failures[:5]:
         print(f"  newly failing: {failure}")
     if execute:
-        ledger.record(
-            TOOL,
+        rows.record(
+            ledger,
+            COMPONENT,
             "lane",
             outcome.outcome,
             outcome.detail,
@@ -287,7 +289,9 @@ def _adopt_core(args: argparse.Namespace, lab: Path, ledger: Ledger) -> None:
         _report(ledger, task, change_one(lab / name, args.core, task), True)
     for cand, yes, reason in coder.decided:
         print(f"  {cand.repo} {cand.local}: {'yes' if yes else 'no'}: {reason[:160]}")
-        ledger.record(TOOL, "verdict", "yes" if yes else "no", reason, **vars(cand))
+        rows.record(
+            ledger, COMPONENT, "verdict", "accepted" if yes else "rejected", reason, **vars(cand)
+        )
 
 
 def main(argv: list[str] | None = None) -> int:

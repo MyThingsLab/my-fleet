@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -21,13 +22,14 @@ def test_the_default_ledger_follows_an_explicit_fleet_root(
     # makes this a test of heartbeat's own resolution rather than of the seam it
     # calls -- assert against workspace.fleet_root directly and it passes just as
     # happily with the parents[3] climb still in place.
+    prior = os.environ.get(workspace.ROOT_ENV)
     monkeypatch.setenv(workspace.ROOT_ENV, str(tmp_path))
     reloaded = importlib.reload(hb)
     try:
         assert reloaded.WORKSPACE_ROOT == tmp_path
         assert reloaded.DEFAULT_LEDGER == workspace.ledger_path(tmp_path)
     finally:
-        monkeypatch.delenv(workspace.ROOT_ENV, raising=False)
+        _restore_root(monkeypatch, prior)
         importlib.reload(hb)
 
 
@@ -44,15 +46,25 @@ def test_the_switch_reads_the_ledger_the_cycle_actually_writes(
     #
     # Pinning them to each other rather than to a literal is the whole point --
     # rename the directory again and this fails only if the two disagree.
+    prior = os.environ.get(workspace.ROOT_ENV)
     monkeypatch.setenv(workspace.ROOT_ENV, str(tmp_path))
     reader = importlib.reload(hb)
     writer = importlib.reload(importlib.import_module("myfleet.fleet_dispatch"))
     try:
         assert reader.DEFAULT_LEDGER == writer.DISPATCH_LEDGER
     finally:
-        monkeypatch.delenv(workspace.ROOT_ENV, raising=False)
+        _restore_root(monkeypatch, prior)
         importlib.reload(hb)
         importlib.reload(writer)
+
+
+def _restore_root(monkeypatch: pytest.MonkeyPatch, prior: str | None) -> None:
+    # Put back what the run had, not nothing: a suite run from a worktree sets the root for
+    # its own imports, and deleting it here would break every module imported after this test.
+    if prior is None:
+        monkeypatch.delenv(workspace.ROOT_ENV, raising=False)
+    else:
+        monkeypatch.setenv(workspace.ROOT_ENV, prior)
 
 
 def test_last_heartbeat_none_when_never_recorded(tmp_path: Path) -> None:

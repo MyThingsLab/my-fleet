@@ -30,10 +30,11 @@ from mythings.labels import escalate
 from mythings.ledger import Ledger
 from mythings.policy import Action, Decision
 
+from myfleet import rows
 from myfleet.workspace import fleet_root, ledger_path
 
 ORG = "MyThingsLab"
-TOOL = "red_main"
+COMPONENT = "red_main"
 KIND = "watch"
 
 WORKSPACE_ROOT = fleet_root(__file__)
@@ -291,13 +292,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{outcome.repo:<18} {outcome.action:<13} {outcome.detail}")
         if outcome.action in ("ok", "no-runs"):
             continue
-        ledger.record(
-            tool=TOOL,
-            kind=KIND,
-            outcome=outcome.action,
-            detail=outcome.detail,
-            target=outcome.repo,
-        )
+        rows.record(ledger, COMPONENT, KIND, outcome.action, outcome.detail, target=outcome.repo)
 
     red = [o for o in outcomes if o.action in ("filed", "already-open")]
     if red:

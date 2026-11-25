@@ -8,6 +8,7 @@ from pathlib import Path
 
 from mythings.ledger import Ledger
 
+from myfleet import rows
 from myfleet.ledger_audit import (
     _parse_ts,
     audit_ledger,
@@ -46,7 +47,7 @@ def test_detects_synthetic_test_rows(tmp_path: Path):
     ledger_file = tmp_path / "ledger.jsonl"
     ledger = Ledger(ledger_file)
 
-    ledger.record("fleet_cycle", "bookkeeping", "ok", synthetic=True)
+    rows.record(ledger, "fleet_cycle", "heartbeat", "ok", synthetic=True)
 
     res = audit_ledger(ledger_file)
     assert res.is_plausible is False
@@ -74,7 +75,7 @@ def test_detects_burst_density_cadence(tmp_path: Path):
 def test_format_human_report(tmp_path: Path):
     ledger_file = tmp_path / "ledger.jsonl"
     ledger = Ledger(ledger_file)
-    ledger.record("fleet_dispatch", "dispatch", "ok")
+    rows.record(ledger, "fleet_dispatch", "dispatch", "ok")
 
     res = audit_ledger(ledger_file)
     report = format_human_report(res)
@@ -85,7 +86,7 @@ def test_format_human_report(tmp_path: Path):
 def test_cli_audit(tmp_path: Path, capsys):
     ledger_file = tmp_path / "ledger.jsonl"
     ledger = Ledger(ledger_file)
-    ledger.record("fleet_dispatch", "dispatch", "ok")
+    rows.record(ledger, "fleet_dispatch", "dispatch", "ok")
 
     rc = main(["--ledger", str(ledger_file), "--json"])
     assert rc == 0

@@ -62,6 +62,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from myfleet import rows
 from myfleet.fleet_dispatch import _checks_state
 
 ORG = "MyThingsLab"
@@ -487,9 +488,10 @@ def settle(
                     merge_pr(repo, number)
                     print(f"ACCEPTED & MERGED: {repo}#{number} {title!r}")
                     if ledger and hasattr(ledger, "record"):
-                        ledger.record(
-                            tool="fleet_accept",
-                            kind="accept",
+                        rows.record(
+                            ledger,
+                            "fleet_accept",
+                            "accept",
                             outcome="merged",
                             repo=repo,
                             pr=number,
@@ -498,9 +500,10 @@ def settle(
                 except Exception as exc:
                     print(f"ACCEPTED but merge FAILED: {repo}#{number}: {exc}", file=sys.stderr)
                     if ledger and hasattr(ledger, "record"):
-                        ledger.record(
-                            tool="fleet_accept",
-                            kind="accept",
+                        rows.record(
+                            ledger,
+                            "fleet_accept",
+                            "accept",
                             outcome="merge_failed",
                             repo=repo,
                             pr=number,
@@ -509,9 +512,10 @@ def settle(
             else:
                 print(f"ACCEPTED (dry run): {repo}#{number} {title!r}")
                 if ledger and hasattr(ledger, "record"):
-                    ledger.record(
-                        tool="fleet_accept",
-                        kind="accept",
+                    rows.record(
+                        ledger,
+                        "fleet_accept",
+                        "accept",
                         outcome="accepted",
                         repo=repo,
                         pr=number,
@@ -541,9 +545,10 @@ def settle(
                             merge_pr(repo, number)
                             print(f"MERGED via Telegram approval: {repo}#{number}")
                             if ledger and hasattr(ledger, "record"):
-                                ledger.record(
-                                    tool="fleet_accept",
-                                    kind="accept",
+                                rows.record(
+                                    ledger,
+                                    "fleet_accept",
+                                    "accept",
                                     outcome="human_approved_and_merged",
                                     repo=repo,
                                     pr=number,
@@ -552,9 +557,10 @@ def settle(
                         except Exception as exc:
                             print(f"FAILED to merge after approval: {repo}#{number}: {exc}", file=sys.stderr)
                             if ledger and hasattr(ledger, "record"):
-                                ledger.record(
-                                    tool="fleet_accept",
-                                    kind="accept",
+                                rows.record(
+                                    ledger,
+                                    "fleet_accept",
+                                    "accept",
                                     outcome="merge_failed",
                                     repo=repo,
                                     pr=number,
@@ -562,9 +568,10 @@ def settle(
                                 )
                     else:
                         if ledger and hasattr(ledger, "record"):
-                            ledger.record(
-                                tool="fleet_accept",
-                                kind="accept",
+                            rows.record(
+                                ledger,
+                                "fleet_accept",
+                                "accept",
                                 outcome="human_approved",
                                 repo=repo,
                                 pr=number,
@@ -582,9 +589,10 @@ def settle(
                     detail = f"{detail} (not asked: settle ask budget spent)"
                 print(f"NEEDS_HUMAN: {repo}#{number} — {detail}")
                 if ledger and hasattr(ledger, "record"):
-                    ledger.record(
-                        tool="fleet_accept",
-                        kind="accept",
+                    rows.record(
+                        ledger,
+                        "fleet_accept",
+                        "accept",
                         outcome="needs_human",
                         repo=repo,
                         pr=number,
@@ -595,9 +603,10 @@ def settle(
         else:
             print(f"REJECTED: {repo}#{number} — {assessment.reason}")
             if ledger and hasattr(ledger, "record"):
-                ledger.record(
-                    tool="fleet_accept",
-                    kind="accept",
+                rows.record(
+                    ledger,
+                    "fleet_accept",
+                    "accept",
                     outcome="rejected",
                     repo=repo,
                     pr=number,

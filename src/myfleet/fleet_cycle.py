@@ -77,6 +77,7 @@ import myfleet.account_usage as account_usage
 import myfleet.fleet_ask as fleet_ask
 import myfleet.heartbeat as heartbeat
 import myfleet.preflight as preflight
+import myfleet.rows as rows
 from myfleet.cycle_driver import Stage, import_or_die, run_command
 from myfleet.fleet_dispatch import (
     DISPATCH_LEDGER,
@@ -97,6 +98,7 @@ TRACKING_REPO = f"{ORG}/my-fleet"
 TRACKING_ISSUE = "121"
 PROJECT_NUMBER = "1"
 DOCS_SITE_CLONE = "mythingslab-site-genesis"
+COMPONENT = "fleet_cycle"
 
 # The study repo is content, not a tool: myuni files topic issues there and
 # myresearcher turns them into cited brief PRs. Like the my-<x> entries, `study`
@@ -586,15 +588,16 @@ def _record_cycle_outcome(ledger: Ledger, failed: list[tuple[str, int]]) -> None
     # actually worked. Recording only the heartbeat is what let 301 consecutive
     # cycles read `ok` while a stage failed in every one of them (#101).
     if not failed:
-        ledger.record(tool="fleet_cycle", kind="cycle", outcome="ok", detail="all stages exited 0")
+        rows.record(ledger, COMPONENT, "cycle", "ok", "all stages exited 0")
         return
     names = ", ".join(f"{name} (rc={rc})" for name, rc in failed)
     print(f"(cycle finished with {len(failed)} failed stage(s): {names})", file=sys.stderr)
-    ledger.record(
-        tool="fleet_cycle",
-        kind="cycle",
-        outcome="stage_failed",
-        detail=f"{len(failed)} stage(s) failed: {names}",
+    rows.record(
+        ledger,
+        COMPONENT,
+        "cycle",
+        "stage_failed",
+        f"{len(failed)} stage(s) failed: {names}",
         failed_stages=[name for name, _ in failed],
     )
 
@@ -619,9 +622,7 @@ def _run_cycle(args: argparse.Namespace, *, accounts: str, skip_dispatch: bool, 
             print(f"(cycle halted — {reason})")
             # Its own outcome, not `ok` and not a failure: a halt is the kill
             # switch working, and reporting it as either hides which happened.
-            dispatch_ledger.record(
-                tool="fleet_cycle", kind="cycle", outcome="halted", detail=reason
-            )
+            rows.record(dispatch_ledger, COMPONENT, "cycle", "halted", reason)
             return 0
 
     failed: list[tuple[str, int]] = []
@@ -688,7 +689,7 @@ def _work_entry_count(ledger: Ledger) -> int:
     """
     return sum(
         1
-        for e in ledger.read(tool="fleet_dispatch", kind="dispatch")
+        for e in rows.read(ledger, "fleet_dispatch", "dispatch")
         if e.outcome in WORK_OUTCOMES
     )
 
@@ -707,11 +708,12 @@ def _record_preflight(ledger: Ledger, blocked: list[preflight.AccountPreflight])
     # which is the thing this check exists to stop the fleet from reporting.
     for result in blocked:
         print(f"(account unusable — {result.outcome}: {result.config_dir}: {result.detail})")
-        ledger.record(
-            tool="fleet_cycle",
-            kind="preflight",
-            outcome=result.outcome,
-            detail=f"{result.config_dir}: {result.detail}",
+        rows.record(
+            ledger,
+            COMPONENT,
+            "preflight",
+            result.outcome,
+            f"{result.config_dir}: {result.detail}",
         )
 
 
@@ -732,11 +734,12 @@ def _refresh_ask_channel(ledger: Ledger, *, timeout: int) -> None:
             "(ask daemon is gone — channel disarmed: ASKs now deny fast instead of "
             "blocking the full timeout; restart `mytelegrambot run` to re-arm)"
         )
-        ledger.record(
-            tool="fleet_cycle",
-            kind="ask_channel",
-            outcome="disarmed",
-            detail="mytelegrambot run daemon no longer running; ask channel disarmed",
+        rows.record(
+            ledger,
+            COMPONENT,
+            "ask_channel",
+            "disarmed",
+            "mytelegrambot run daemon no longer running; ask channel disarmed",
         )
     elif not armed and alive:
         try:
@@ -745,18 +748,19 @@ def _refresh_ask_channel(ledger: Ledger, *, timeout: int) -> None:
             print(f"(ask daemon is back but the channel is still unavailable: {exc})")
             return
         print("(ask daemon is back — channel re-armed)")
-        ledger.record(
-            tool="fleet_cycle",
-            kind="ask_channel",
-            outcome="rearmed",
-            detail="mytelegrambot run daemon back; ask channel re-armed",
+        rows.record(
+            ledger,
+            COMPONENT,
+            "ask_channel",
+            "rearmed",
+            "mytelegrambot run daemon back; ask channel re-armed",
         )
 
 
 def _run_loop(args: argparse.Namespace, py: str) -> int:
     pool = [a.strip() for a in args.accounts.split(",") if a.strip()]
     dispatch_ledger = Ledger(DISPATCH_LEDGER)
-    start_usage_count = len(dispatch_ledger.read(tool="fleet_dispatch", kind="usage"))
+    start_usage_count = len(rows.read(dispatch_ledger, "fleet_dispatch", "usage"))
     loop_start = time.monotonic()
     idle_backoff_s = args.idle_backoff_min * 60.0
     backoff_s = idle_backoff_s
@@ -769,7 +773,7 @@ def _run_loop(args: argparse.Namespace, py: str) -> int:
         elapsed_min = (time.monotonic() - loop_start) / 60.0
         spent_usd = sum(
             e.data.get("cost_usd", 0.0)
-            for e in dispatch_ledger.read(tool="fleet_dispatch", kind="usage")[start_usage_count:]
+            for e in rows.read(dispatch_ledger, "fleet_dispatch", "usage")[start_usage_count:]
         )
         stop_reason = _loop_should_stop(
             elapsed_min=elapsed_min,
