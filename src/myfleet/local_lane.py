@@ -37,14 +37,18 @@ from myfleet.workspace import fleet_root, ledger_path
 COMPONENT = "local_lane"
 SUITE_SECONDS = 900
 _REPORTED = re.compile(r"^(FAILED|ERROR) (\S+)")
+# pytest's exit codes that mean the suite ran to a verdict: 0 all passed, 1 some failed (compared
+# against main below). Every other code (2 interrupted, 3 internal error, 4 usage, 5 nothing
+# collected, -1 timeout) means no verdict, and a gate must not read that as a pass.
+_RAN = (0, 1)
 
 Run = Callable[..., subprocess.CompletedProcess[str]]
 
 
 @dataclass(frozen=True)
 class Suite:
-    failed: frozenset[str]  # node ids that failed or errored, plus "<collection>" when it broke
-    code: int
+    failed: frozenset[str]  # node ids that failed or errored
+    code: int  # pytest's exit code: 0 passed, 1 some failed, anything else did not run to a verdict
 
 
 @dataclass(frozen=True)
@@ -120,8 +124,6 @@ def revendor(tree: Path) -> list[str]:
 
 def parse_suite(output: str, code: int) -> Suite:
     failed = {m.group(2) for line in output.splitlines() if (m := _REPORTED.match(line))}
-    if code not in (0, 1, 5):  # 2: interrupted, 3: internal error, 4: usage: nothing ran
-        failed.add("<collection>")
     return Suite(failed=frozenset(failed), code=code)
 
 
@@ -209,12 +211,18 @@ def change_one(
 
 def _gated(repo: Path, tree: Path, core: Path, task: Task, run: Run) -> Outcome:
     before = run_suite(tree, core, run=run)
+    if before.code not in _RAN:
+        detail = f"the suite did not run on main (pytest exit {before.code})"
+        return Outcome(repo.name, "failed", detail)
     files = task.apply(tree)
     if not files:
         return Outcome(repo.name, "skipped", "nothing to change on main")
     _tidy_imports(tree, files, run)
     files += revendor(tree)
     after = run_suite(tree, core, run=run)
+    if after.code not in _RAN:
+        detail = f"the suite did not run after the change (pytest exit {after.code})"
+        return Outcome(repo.name, "failed", detail, tuple(files))
     new = tuple(sorted(after.failed - before.failed))
     if new:
         detail = f"{len(new)} test(s) that passed on main fail after the change"

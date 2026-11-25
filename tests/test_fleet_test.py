@@ -52,7 +52,7 @@ def test_run_suites_argv_env_and_cwd(tmp_path: Path) -> None:
     # Pass-through, not an override: the attended path inherits the caller's
     # env verbatim (including GITHUB_ACTIONS when fleet_test runs inside CI).
     assert env.get("GITHUB_ACTIONS") == ft.os.environ.get("GITHUB_ACTIONS")
-    assert results == [ft.RepoResult("my-a", True, results[0].duration)]
+    assert results == [ft.RepoResult("my-a", 0, results[0].duration)]
 
 
 def test_run_suites_unattended_and_slow_flags(tmp_path: Path) -> None:
@@ -88,13 +88,28 @@ def test_run_suites_puts_the_checkout_src_first_on_pythonpath(
     assert seen[0]["PYTHONPATH"] == f"{root / 'my-a' / 'src'}:/elsewhere"
 
 
-def test_summarize_reports_failures() -> None:
-    out = ft.summarize(
-        [ft.RepoResult("my-a", True, 1.0), ft.RepoResult("my-b", False, 2.0)]
+def test_a_suite_is_green_only_on_exit_zero(tmp_path: Path) -> None:
+    root = make_workspace(tmp_path, "my-a", "my-b", "my-c")
+    codes = {"my-a": 0, "my-b": 1, "my-c": 5}
+
+    results = ft.run_suites(
+        ft.test_repos(root), runner=lambda argv, cwd, env: codes[cwd.name]
     )
+
+    assert [r.passed for r in results] == [True, False, False]
+
+
+def test_summarize_reports_failures() -> None:
+    out = ft.summarize([ft.RepoResult("my-a", 0, 1.0), ft.RepoResult("my-b", 1, 2.0)])
     assert "1/2 suites green" in out
     assert "FAILED: my-b" in out
     assert "my-a" in out and "ok" in out
+
+
+def test_summarize_names_the_exit_code_of_a_suite_that_did_not_run() -> None:
+    out = ft.summarize([ft.RepoResult("my-a", 0, 1.0), ft.RepoResult("my-b", 5, 2.0)])
+    assert "my-b" in out and "exit 5" in out
+    assert "exit 0" not in out
 
 
 def test_check_editable_core_accepts_the_serving_checkout() -> None:

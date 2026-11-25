@@ -24,6 +24,10 @@ def lab_python(monkeypatch: pytest.MonkeyPatch) -> None:
     import sys
 
     monkeypatch.setattr(paths, "lab_python", lambda: Path(sys.executable))
+    # The fake core in these tests shadows the real `mythings` package, and pytest's own
+    # `mythings.testing` plugin cannot import through it (exit 3 before any test runs). The
+    # fake core is what is under test, so the inner run keeps it and drops that plugin.
+    monkeypatch.setenv("PYTEST_ADDOPTS", "-p no:mythings.testing")
 
 
 def _core(root: Path) -> Path:
@@ -107,12 +111,50 @@ def test_the_dry_run_reads_main_and_changes_nothing(tmp_path: Path) -> None:
     assert _git(repo, "branch").strip() == "* main"
 
 
-def test_the_suite_report_names_what_failed_and_a_broken_collection() -> None:
+def test_the_suite_report_names_what_failed_and_the_exit_code() -> None:
     out = "FAILED tests/test_a.py::test_x - assert 1\nERROR tests/test_b.py - ImportError\n"
 
     assert local_lane.parse_suite(out, 1).failed == {"tests/test_a.py::test_x", "tests/test_b.py"}
-    assert "<collection>" in local_lane.parse_suite("", 2).failed
-    assert local_lane.parse_suite("", 5).failed == frozenset()
+    assert local_lane.parse_suite("", 2).code == 2
+    assert local_lane.parse_suite("", 5).code == 5
+
+
+def _pytest_exits(*codes: int) -> local_lane.Run:
+    # Each pytest call exits with the next code given; git and the rest run for real.
+    remaining = list(codes)
+
+    def run(argv, **kwargs):
+        if "pytest" in argv:
+            return subprocess.CompletedProcess(argv, remaining.pop(0), "", "")
+        return subprocess.run(argv, **kwargs)
+
+    return run
+
+
+@pytest.mark.parametrize("code", [2, 3, 5])
+def test_a_suite_that_did_not_run_on_main_fails_the_change_with_its_exit_code(
+    tmp_path: Path, code: int
+) -> None:
+    repo = _tool(tmp_path)
+
+    outcome = local_lane.change_one(repo, _core(tmp_path / "core"), run=_pytest_exits(code))
+
+    assert outcome.outcome == "failed"
+    assert f"exit {code}" in outcome.detail
+    assert local_lane.BRANCH not in _git(repo, "branch")
+
+
+@pytest.mark.parametrize("code", [3, 5])
+def test_a_suite_that_did_not_run_after_the_change_fails_it_with_its_exit_code(
+    tmp_path: Path, code: int
+) -> None:
+    repo = _tool(tmp_path)
+
+    outcome = local_lane.change_one(repo, _core(tmp_path / "core"), run=_pytest_exits(0, code))
+
+    assert outcome.outcome == "failed"
+    assert f"exit {code}" in outcome.detail
+    assert local_lane.BRANCH not in _git(repo, "branch")
 
 
 def _lab(tmp_path: Path) -> Path:

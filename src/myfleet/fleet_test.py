@@ -42,8 +42,14 @@ Runner = Callable[[list[str], Path, dict[str, str]], int]
 @dataclass(frozen=True)
 class RepoResult:
     name: str
-    passed: bool
+    code: int
     duration: float
+
+    @property
+    def passed(self) -> bool:
+        # Only a suite that ran to completion and passed is green: exit 5 (nothing collected)
+        # and an internal error (3) are not passes, whatever the output says.
+        return self.code == 0
 
 
 def test_repos(root: Path, only: list[str] | None = None) -> list[Path]:
@@ -107,15 +113,18 @@ def run_suites(
             env["PYTHONPATH"] = str(src) + (os.pathsep + prior if prior else "")
         start = time.monotonic()
         code = runner(argv, repo, env)
-        results.append(RepoResult(repo.name, code == 0, time.monotonic() - start))
+        results.append(RepoResult(repo.name, code, time.monotonic() - start))
     return results
+
+
+def _status(result: RepoResult) -> str:
+    return "ok" if result.passed else f"FAIL (exit {result.code})"
 
 
 def summarize(results: list[RepoResult]) -> str:
     width = max(len(r.name) for r in results)
     lines = [
-        f"{r.name:<{width}}  {'ok' if r.passed else 'FAIL':<4}  {r.duration:6.1f}s"
-        for r in results
+        f"{r.name:<{width}}  {_status(r):<4}  {r.duration:6.1f}s" for r in results
     ]
     failed = [r.name for r in results if not r.passed]
     total = sum(r.duration for r in results)

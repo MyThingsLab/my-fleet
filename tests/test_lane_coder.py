@@ -51,6 +51,9 @@ _CAND = lane_coder.Candidate(
 @pytest.fixture(autouse=True)
 def lab_python(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(paths, "lab_python", lambda: Path(sys.executable))
+    # The fake core shadows the real `mythings` package; the inner run keeps the fake and
+    # drops pytest's `mythings.testing` plugin, which cannot import through it.
+    monkeypatch.setenv("PYTEST_ADDOPTS", "-p no:mythings.testing")
 
 
 def _core(root: Path) -> Path:
