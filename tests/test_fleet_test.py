@@ -63,9 +63,7 @@ def test_run_suites_unattended_and_slow_flags(tmp_path: Path) -> None:
         seen.append((argv, env))
         return 1
 
-    results = ft.run_suites(
-        ft.test_repos(root), unattended=True, include_slow=True, runner=runner
-    )
+    results = ft.run_suites(ft.test_repos(root), unattended=True, include_slow=True, runner=runner)
     argv, env = seen[0]
     assert "not slow" not in argv
     assert env["GITHUB_ACTIONS"] == "true"
@@ -92,9 +90,7 @@ def test_a_suite_is_green_only_on_exit_zero(tmp_path: Path) -> None:
     root = make_workspace(tmp_path, "my-a", "my-b", "my-c")
     codes = {"my-a": 0, "my-b": 1, "my-c": 5}
 
-    results = ft.run_suites(
-        ft.test_repos(root), runner=lambda argv, cwd, env: codes[cwd.name]
-    )
+    results = ft.run_suites(ft.test_repos(root), runner=lambda argv, cwd, env: codes[cwd.name])
 
     assert [r.passed for r in results] == [True, False, False]
 
@@ -130,9 +126,7 @@ def test_main_exit_codes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
     root = make_workspace(tmp_path, "my-a", "my-b")
     monkeypatch.setattr(ft, "check_editable_core", lambda _root: None)
     codes = {"my-a": 0, "my-b": 1}
-    monkeypatch.setattr(
-        ft, "default_runner", lambda argv, cwd, env: codes[cwd.name]
-    )
+    monkeypatch.setattr(ft, "default_runner", lambda argv, cwd, env: codes[cwd.name])
     assert ft.main(["--root", str(root)]) == 1
     assert "FAILED: my-b" in capsys.readouterr().out
 

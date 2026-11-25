@@ -53,9 +53,7 @@ class RepoResult:
 
 
 def test_repos(root: Path, only: list[str] | None = None) -> list[Path]:
-    repos = sorted(
-        p.parent for p in root.glob("*/pyproject.toml") if (p.parent / "tests").is_dir()
-    )
+    repos = sorted(p.parent for p in root.glob("*/pyproject.toml") if (p.parent / "tests").is_dir())
     if only:
         known = {r.name: r for r in repos}
         missing = [name for name in only if name not in known]
@@ -123,9 +121,7 @@ def _status(result: RepoResult) -> str:
 
 def summarize(results: list[RepoResult]) -> str:
     width = max(len(r.name) for r in results)
-    lines = [
-        f"{r.name:<{width}}  {_status(r):<4}  {r.duration:6.1f}s" for r in results
-    ]
+    lines = [f"{r.name:<{width}}  {_status(r):<4}  {r.duration:6.1f}s" for r in results]
     failed = [r.name for r in results if not r.passed]
     total = sum(r.duration for r in results)
     lines.append(f"{len(results) - len(failed)}/{len(results)} suites green in {total:.1f}s")
