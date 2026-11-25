@@ -75,7 +75,9 @@ def last_heartbeat(ledger: Ledger, tick: str) -> datetime | None:
 
 def last_alert(ledger: Ledger, tick: str) -> tuple[str, datetime] | None:
     """The most recent thing this switch said about `tick`, and when."""
-    entries = [e for e in rows.read(ledger, COMPONENT, ALERT_KIND) if e.data.get("tick") == tick]
+    entries = [
+        e for e in rows.read(ledger, COMPONENT, ALERT_KIND) if e.data.get("tick") == tick
+    ]
     if not entries:
         return None
     return rows.word_of(entries[-1]), _parse_ts(entries[-1].ts)
@@ -139,7 +141,9 @@ def transitions(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--ledger", type=Path, default=DEFAULT_LEDGER)
-    parser.add_argument("--max-age-build-min", type=float, default=DEFAULT_MAX_AGE_MIN["build"])
+    parser.add_argument(
+        "--max-age-build-min", type=float, default=DEFAULT_MAX_AGE_MIN["build"]
+    )
     parser.add_argument(
         "--max-age-bookkeeping-min", type=float, default=DEFAULT_MAX_AGE_MIN["bookkeeping"]
     )

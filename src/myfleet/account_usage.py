@@ -123,9 +123,9 @@ class GeminiUsageProvider:
                 timeout=timeout,
             )
             if proc.returncode != 0:
-                reason = (proc.stderr.strip() or proc.stdout.strip() or f"exit {proc.returncode}")[
-                    :200
-                ]
+                reason = (
+                    proc.stderr.strip() or proc.stdout.strip() or f"exit {proc.returncode}"
+                )[:200]
                 raise UsageCheckError(f"{bin_name} --version failed for {config_dir}: {reason}")
         except FileNotFoundError as exc:
             raise UsageCheckError(f"CLI binary not found: {bin_name}") from exc
@@ -146,7 +146,9 @@ PROVIDERS = {
 }
 
 
-def check_account(config_dir: str, timeout: float = 30.0, provider: str = "claude") -> AccountUsage:
+def check_account(
+    config_dir: str, timeout: float = 30.0, provider: str = "claude"
+) -> AccountUsage:
     p = PROVIDERS.get(provider)
     if not p:
         raise UsageCheckError(f"unknown provider: {provider}")
@@ -191,7 +193,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Check AI subscription session usage per account and pick usable ones."
     )
-    parser.add_argument("--accounts", required=True, help="comma-separated config directory paths")
+    parser.add_argument(
+        "--accounts", required=True, help="comma-separated config directory paths"
+    )
     parser.add_argument(
         "--provider",
         choices=("claude", "gemini"),

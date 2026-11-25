@@ -427,10 +427,10 @@ def test_build_tick_records_only_the_build_heartbeat(
     ledger_path = tmp_path / "ledger.jsonl"
     monkeypatch.setattr(fc, "DISPATCH_LEDGER", ledger_path)
     monkeypatch.setattr(fc, "WORKSPACE_ROOT", tmp_path)
-    fc.main(["--accounts", "/tmp/acct", "--execute", "--brief-count", "0", "--skip-bookkeeping"])
-    ticks = [
-        e.data.get("tick") for e in rows.read(fc.Ledger(ledger_path), "fleet_cycle", "heartbeat")
-    ]
+    fc.main(
+        ["--accounts", "/tmp/acct", "--execute", "--brief-count", "0", "--skip-bookkeeping"]
+    )
+    ticks = [e.data.get("tick") for e in rows.read(fc.Ledger(ledger_path), "fleet_cycle", "heartbeat")]
     assert ticks == ["build"]
 
 
@@ -442,9 +442,7 @@ def test_bookkeeping_tick_records_only_the_bookkeeping_heartbeat(
     monkeypatch.setattr(fc, "DISPATCH_LEDGER", ledger_path)
     monkeypatch.setattr(fc, "WORKSPACE_ROOT", tmp_path)
     fc.main(["--accounts", "/tmp/acct", "--skip-dispatch", "--execute", "--brief-count", "0"])
-    ticks = [
-        e.data.get("tick") for e in rows.read(fc.Ledger(ledger_path), "fleet_cycle", "heartbeat")
-    ]
+    ticks = [e.data.get("tick") for e in rows.read(fc.Ledger(ledger_path), "fleet_cycle", "heartbeat")]
     assert ticks == ["bookkeeping"]
 
 
@@ -456,9 +454,7 @@ def test_a_full_cycle_records_both_heartbeats(
     monkeypatch.setattr(fc, "DISPATCH_LEDGER", ledger_path)
     monkeypatch.setattr(fc, "WORKSPACE_ROOT", tmp_path)
     fc.main(["--accounts", "/tmp/acct", "--execute", "--brief-count", "0"])
-    ticks = {
-        e.data.get("tick") for e in rows.read(fc.Ledger(ledger_path), "fleet_cycle", "heartbeat")
-    }
+    ticks = {e.data.get("tick") for e in rows.read(fc.Ledger(ledger_path), "fleet_cycle", "heartbeat")}
     assert ticks == {"build", "bookkeeping"}
 
 
@@ -476,9 +472,7 @@ def test_halted_cycle_still_records_a_heartbeat(
     monkeypatch.setattr(fc, "HALT_MARKER", marker)
     fc.main(["--accounts", "/tmp/acct", "--execute", "--skip-dispatch", "--brief-count", "0"])
     assert calls == []
-    ticks = {
-        e.data.get("tick") for e in rows.read(fc.Ledger(ledger_path), "fleet_cycle", "heartbeat")
-    }
+    ticks = {e.data.get("tick") for e in rows.read(fc.Ledger(ledger_path), "fleet_cycle", "heartbeat")}
     assert ticks == {"bookkeeping"}
 
 
@@ -591,9 +585,7 @@ def test_next_backoff_doubles_and_caps_when_idle() -> None:
     )
 
 
-@pytest.mark.parametrize(
-    "idle_outcome", ["backlog_empty", "no_dispatchable_candidates", "halted_critical"]
-)
+@pytest.mark.parametrize("idle_outcome", ["backlog_empty", "no_dispatchable_candidates", "halted_critical"])
 def test_an_idle_dispatch_entry_still_backs_off_and_sleeps(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, idle_outcome: str
 ) -> None:
@@ -1084,7 +1076,9 @@ def test_a_raising_stage_fails_the_cycle_without_aborting_later_stages(
     monkeypatch.setattr(fc, "DISPATCH_LEDGER", ledger_path)
     monkeypatch.setattr(fc, "WORKSPACE_ROOT", tmp_path)
 
-    rc = fc.main(["--accounts", "/tmp/acct", "--skip-dispatch", "--execute", "--brief-count", "0"])
+    rc = fc.main(
+        ["--accounts", "/tmp/acct", "--skip-dispatch", "--execute", "--brief-count", "0"]
+    )
 
     assert rc == 1
     entries = rows.read(fc.Ledger(ledger_path), "fleet_cycle", "cycle")
@@ -1131,14 +1125,7 @@ def test_docs_stage_skips_when_mydocs_is_not_installed(
 
 
 def test_stage_dispatch_passes_provider() -> None:
-    args = _loop_ns(
-        provider="gemini",
-        dispatch_execute=False,
-        allow_personal_token=False,
-        app_id=None,
-        app_installation_id=None,
-        app_private_key=None,
-    )
+    args = _loop_ns(provider="gemini", dispatch_execute=False, allow_personal_token=False, app_id=None, app_installation_id=None, app_private_key=None)
     ctx = fc._Ctx(args=args, accounts="/tmp/acct", skip_dispatch=False, py="python3")
     stages = fc._stage_dispatch(ctx)
     assert len(stages) == 1
@@ -1199,3 +1186,5 @@ def test_every_lab_stage_subcommand_accepts_help(prefix: tuple[str, ...]) -> Non
         [*prefix, "--help"], env=env, capture_output=True, text=True, timeout=60, check=False
     )
     assert result.returncode == 0, result.stderr
+
+

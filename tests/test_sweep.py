@@ -361,7 +361,9 @@ def test_composing_transforms_applies_both_in_one_commit(tmp_path: Path) -> None
     repo = make_repo(tmp_path, "my-a", workflow=WORKFLOW)
     both = sweep.compose(["harness", "ci-md"])
 
-    out = sweep.apply_to(repo, both, execute=False, allow_unchecked=False, runner=fake_runner([]))
+    out = sweep.apply_to(
+        repo, both, execute=False, allow_unchecked=False, runner=fake_runner([])
+    )
 
     assert out.state == "would_change"
     assert out.changed == [".github/workflows/ci.yml", "HARNESS.md"]

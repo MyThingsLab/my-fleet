@@ -73,12 +73,16 @@ def ask_binary() -> Path | None:
     return Path(found) if found else None
 
 
-def ask_command(*, ledger: Path = BOT_LEDGER, timeout: int = DEFAULT_ASK_TIMEOUT) -> str:
+def ask_command(
+    *, ledger: Path = BOT_LEDGER, timeout: int = DEFAULT_ASK_TIMEOUT
+) -> str:
     binary = ask_binary() or Path("mytelegrambot")
     return f"{binary} ask --ledger {ledger} --timeout {timeout}"
 
 
-def ask_env(*, ledger: Path = BOT_LEDGER, timeout: int = DEFAULT_ASK_TIMEOUT) -> dict[str, str]:
+def ask_env(
+    *, ledger: Path = BOT_LEDGER, timeout: int = DEFAULT_ASK_TIMEOUT
+) -> dict[str, str]:
     return {
         "MYTHINGS_ASK_CMD": ask_command(ledger=ledger, timeout=timeout),
         # Guard's backstop, above `ask`'s own deadline so the inner timeout is the
@@ -164,25 +168,20 @@ def enable(
 _NOTIFY_TIMEOUT = 30
 
 
-def alert_spend(*, spent: float, cap: float, raise_to: float, ledger: Path = BOT_LEDGER) -> bool:
+def alert_spend(
+    *, spent: float, cap: float, raise_to: float, ledger: Path = BOT_LEDGER
+) -> bool:
     binary = ask_binary() or Path("mytelegrambot")
     try:
         proc = subprocess.run(
             [
-                str(binary),
-                "alert-spend",
-                "--spent",
-                f"{spent:.2f}",
-                "--cap",
-                f"{cap:.2f}",
-                "--raise-to",
-                f"{raise_to:.2f}",
-                "--ledger",
-                str(ledger),
+                str(binary), "alert-spend",
+                "--spent", f"{spent:.2f}",
+                "--cap", f"{cap:.2f}",
+                "--raise-to", f"{raise_to:.2f}",
+                "--ledger", str(ledger),
             ],
-            capture_output=True,
-            text=True,
-            timeout=_NOTIFY_TIMEOUT,
+            capture_output=True, text=True, timeout=_NOTIFY_TIMEOUT,
         )
     except (OSError, subprocess.SubprocessError):
         return False
@@ -196,20 +195,13 @@ def escalate_blocker(
     try:
         proc = subprocess.run(
             [
-                str(binary),
-                "escalate-blocker",
-                "--candidate",
-                candidate,
-                "--detail",
-                detail,
-                "--attempt",
-                str(attempt),
-                "--ledger",
-                str(ledger),
+                str(binary), "escalate-blocker",
+                "--candidate", candidate,
+                "--detail", detail,
+                "--attempt", str(attempt),
+                "--ledger", str(ledger),
             ],
-            capture_output=True,
-            text=True,
-            timeout=_NOTIFY_TIMEOUT,
+            capture_output=True, text=True, timeout=_NOTIFY_TIMEOUT,
         )
     except (OSError, subprocess.SubprocessError):
         return False

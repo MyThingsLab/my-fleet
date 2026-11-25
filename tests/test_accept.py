@@ -380,7 +380,9 @@ class TestNewDependency:
         )
         assert added == frozenset({"mypy"})
 
-    def test_a_removed_dependency_is_not_an_addition(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_a_removed_dependency_is_not_an_addition(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         added = self._added(monkeypatch, self._pyproject("x", "y"), self._pyproject("x"))
         assert added == frozenset()
 
@@ -396,7 +398,9 @@ class TestNewDependency:
         added = self._added(monkeypatch, self._pyproject("x"), "[project\nbroken")
         assert added is None
 
-    def test_a_pr_adding_a_dependency_needs_a_human(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_a_pr_adding_a_dependency_needs_a_human(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         pr = {
             "isDraft": False,
             "body": "Closes #5",
@@ -468,9 +472,7 @@ class TestNewDependency:
 
 
 class TestSettle:
-    def test_settle_evaluates_open_prs_and_records_ledger(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_settle_evaluates_open_prs_and_records_ledger(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from myfleet.accept import settle
 
         prs = [("my-fleet", 10, "feat: thing", False)]
@@ -590,3 +592,4 @@ class TestSettleAskBudget:
         # claim a budget ran out -- there was no budget in play.
         assert not any(r["asked"] for r in ledger.records)
         assert not any("budget spent" in r["detail"] for r in ledger.records)
+

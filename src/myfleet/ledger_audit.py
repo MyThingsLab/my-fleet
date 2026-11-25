@@ -53,7 +53,8 @@ class LedgerAuditResult:
             "burst_density_detected": self.burst_density_detected,
             "synthetic_rows_detected": self.synthetic_rows_detected,
             "anomalies": [
-                {"kind": a.kind, "message": a.message, "count": a.count} for a in self.anomalies
+                {"kind": a.kind, "message": a.message, "count": a.count}
+                for a in self.anomalies
             ],
         }
 

@@ -82,16 +82,9 @@ def build_decompose_stage(args: argparse.Namespace) -> Stage | None:
     return Stage(
         name="mysyllabus decompose",
         argv=[
-            "mysyllabus",
-            "decompose",
-            "--program",
-            str(args.program),
-            "--engine",
-            args.engine,
-            "--out",
-            str(topics_file),
-            "--max-topics",
-            str(args.max_topics),
+            "mysyllabus", "decompose", "--program", str(args.program),
+            "--engine", args.engine, "--out", str(topics_file),
+            "--max-topics", str(args.max_topics),
         ],
         skip=None if not topics_file.exists() else "topic list already exists",
     )
@@ -125,16 +118,9 @@ def build_study_stages(args: argparse.Namespace) -> list[Stage]:
             Stage(
                 name=f"myflashcards build [{slug}]",
                 argv=[
-                    "myflashcards",
-                    "build",
-                    title,
-                    *corpus_args,
-                    "--deck",
-                    str(args.deck_dir / f"{slug}.toml"),
-                    "--count",
-                    str(args.cards),
-                    "--engine",
-                    args.engine,
+                    "myflashcards", "build", title, *corpus_args,
+                    "--deck", str(args.deck_dir / f"{slug}.toml"),
+                    "--count", str(args.cards), "--engine", args.engine,
                 ],
             )
         )
@@ -142,14 +128,8 @@ def build_study_stages(args: argparse.Namespace) -> list[Stage]:
             Stage(
                 name=f"myprofessor quiz [{slug}]",
                 argv=[
-                    "myprofessor",
-                    "quiz",
-                    title,
-                    *corpus_args,
-                    "--questions",
-                    str(args.questions),
-                    "--engine",
-                    args.engine,
+                    "myprofessor", "quiz", title, *corpus_args,
+                    "--questions", str(args.questions), "--engine", args.engine,
                 ],
             )
         )
@@ -169,60 +149,24 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument(
-        "--corpus",
-        type=Path,
-        action="append",
-        required=True,
-        help="study material for grounding (repeatable): PDFs, notes, slides",
-    )
-    parser.add_argument(
-        "--program",
-        type=Path,
-        default=None,
-        help="course program / syllabus to decompose into topics (optional)",
-    )
-    parser.add_argument(
-        "--workdir",
-        type=Path,
-        default=Path.cwd(),
-        help="where the local topics/decks/ledger live (default: cwd)",
-    )
-    parser.add_argument(
-        "--topics-file",
-        type=Path,
-        default=None,
-        help="topic list TOML (default: <workdir>/.mythings/topics.toml)",
-    )
-    parser.add_argument(
-        "--ledger",
-        type=Path,
-        default=None,
-        help="mastery ledger (default: <workdir>/.mythings/mastery.jsonl)",
-    )
-    parser.add_argument(
-        "--deck-dir",
-        type=Path,
-        default=None,
-        help="where flashcard decks are written (default: <workdir>/.mythings/decks)",
-    )
-    parser.add_argument(
-        "--engine",
-        choices=["noop", "claude"],
-        default="noop",
-        help="Engine backend for the billed steps (decompose/build/quiz)",
-    )
-    parser.add_argument(
-        "--execute",
-        action="store_true",
-        help="run the billed Engine steps for real (otherwise dry run)",
-    )
-    parser.add_argument(
-        "--topics-per-cycle",
-        type=int,
-        default=3,
-        help="how many topics to drill this pass (weakest/never-seen first)",
-    )
+    parser.add_argument("--corpus", type=Path, action="append", required=True,
+                        help="study material for grounding (repeatable): PDFs, notes, slides")
+    parser.add_argument("--program", type=Path, default=None,
+                        help="course program / syllabus to decompose into topics (optional)")
+    parser.add_argument("--workdir", type=Path, default=Path.cwd(),
+                        help="where the local topics/decks/ledger live (default: cwd)")
+    parser.add_argument("--topics-file", type=Path, default=None,
+                        help="topic list TOML (default: <workdir>/.mythings/topics.toml)")
+    parser.add_argument("--ledger", type=Path, default=None,
+                        help="mastery ledger (default: <workdir>/.mythings/mastery.jsonl)")
+    parser.add_argument("--deck-dir", type=Path, default=None,
+                        help="where flashcard decks are written (default: <workdir>/.mythings/decks)")
+    parser.add_argument("--engine", choices=["noop", "claude"], default="noop",
+                        help="Engine backend for the billed steps (decompose/build/quiz)")
+    parser.add_argument("--execute", action="store_true",
+                        help="run the billed Engine steps for real (otherwise dry run)")
+    parser.add_argument("--topics-per-cycle", type=int, default=3,
+                        help="how many topics to drill this pass (weakest/never-seen first)")
     parser.add_argument("--questions", type=int, default=3, help="questions per quiz")
     parser.add_argument("--cards", type=int, default=8, help="flashcards per deck")
     parser.add_argument("--max-topics", type=int, default=40, help="cap on decomposed topics")

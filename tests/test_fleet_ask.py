@@ -64,7 +64,9 @@ def test_enable_refuses_when_no_daemon_is_running(
     monkeypatch.setattr(fleet_ask, "daemon_is_running", lambda: False)
     env: dict[str, str] = dict(_CREDS)
 
-    with pytest.raises(fleet_ask.AskChannelUnavailable, match="no `mytelegrambot run` daemon"):
+    with pytest.raises(
+        fleet_ask.AskChannelUnavailable, match="no `mytelegrambot run` daemon"
+    ):
         fleet_ask.enable(ledger=ledger, env=env)
 
     assert "MYTHINGS_ASK_CMD" not in env  # nothing armed
@@ -77,7 +79,9 @@ def test_enable_refuses_when_the_ledger_directory_does_not_exist(
     monkeypatch.setattr(fleet_ask, "daemon_is_running", lambda: True)
     env: dict[str, str] = dict(_CREDS)
 
-    with pytest.raises(fleet_ask.AskChannelUnavailable, match="ledger directory does not exist"):
+    with pytest.raises(
+        fleet_ask.AskChannelUnavailable, match="ledger directory does not exist"
+    ):
         fleet_ask.enable(ledger=tmp_path / "nope" / "ledger.jsonl", env=env)
 
     assert "MYTHINGS_ASK_CMD" not in env
@@ -268,6 +272,7 @@ def test_ask_channel_probes_daemon_on_nonzero_exit_and_raises(
         channel(action)
 
 
+
 def test_enable_refuses_when_the_bot_credentials_are_missing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -413,3 +418,4 @@ def test_fleet_root_raises_or_resolves_env_var_in_worktree(
     real_root.mkdir()
     monkeypatch.setenv(ROOT_ENV, str(real_root))
     assert fleet_root(str(isolated_file)) == real_root.resolve()
+

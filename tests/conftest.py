@@ -47,9 +47,7 @@ def telegram(
 
 
 @pytest.fixture(autouse=True)
-def isolate_test_ledger(
-    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def isolate_test_ledger(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> None:
     # F2 fix: Prevent test executions from ever writing to the production `.my-fleet/ledger.jsonl`.
     ws = tmp_path_factory.mktemp("test_workspace")
     (ws / "my-things-core").mkdir(parents=True, exist_ok=True)
@@ -61,25 +59,22 @@ def isolate_test_ledger(
     # Also patch imported module defaults if they were evaluated at import time
     try:
         import myfleet.fleet_cycle as fc
-
         monkeypatch.setattr(fc, "DISPATCH_LEDGER", ledger_file, raising=False)
     except ImportError:
         pass
     try:
         import myfleet.fleet_dispatch as fd
-
         monkeypatch.setattr(fd, "DISPATCH_LEDGER", ledger_file, raising=False)
     except ImportError:
         pass
     try:
         import myfleet.heartbeat as hb
-
         monkeypatch.setattr(hb, "DEFAULT_LEDGER", ledger_file, raising=False)
     except ImportError:
         pass
     try:
         import myfleet.red_main as rm
-
         monkeypatch.setattr(rm, "DEFAULT_LEDGER", ledger_file, raising=False)
     except ImportError:
         pass
+
