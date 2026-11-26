@@ -17,7 +17,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-ROOT = Path("/home/lollinux/Desktop/MyThingsLab")
+ROOT = Path.home() / "MyThingsLab"
 VENV = ROOT / ".venv/bin"
 WORK = Path(sys.argv[1] if len(sys.argv) > 1 else "/tmp/fanout2")
 BRANCH = "chore/test-this-checkouts-source"
