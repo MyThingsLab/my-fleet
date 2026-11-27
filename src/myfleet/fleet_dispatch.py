@@ -33,7 +33,7 @@ removes it. See README.md's "Kill switch" section for the one-line runbook.
 Every headless session is bounded three ways: --max-budget-usd (spend),
 --max-turns (turn count), and --session-timeout-s (wall-clock time, in case a
 single turn stalls rather than exhausting its turn/budget cap). A timeout is
-recorded as a "deferred" outcome -- resumable, not counted toward MAX_ATTEMPTS.
+recorded as a "paused" outcome -- resumable, not counted toward MAX_ATTEMPTS.
 """
 
 from __future__ import annotations
@@ -55,9 +55,10 @@ from myorchestrator.candidates import Candidate
 from myorchestrator.manifest import default_manifest_path
 from myorchestrator.orchestrator import Orchestrator, Recommendation
 from mythings.github import app_installation_org, github_app_token
-from mythings.ledger import Ledger
+from mythings.ledger import Ledger, means
 
 import myfleet.fleet_ask as fleet_ask
+import myfleet.rows as rows
 from myfleet.workspace import ROOT_ENV, fleet_root, ledger_path, runtime_dir
 
 # Climbs myfleet/<file>.py -> src -> my-fleet -> MyThingsLab/ (the fleet root),
@@ -216,7 +217,7 @@ def _today_spend_usd(ledger: Ledger, *, today: str | None = None) -> float:
     day = today or datetime.now(UTC).strftime("%Y-%m-%d")
     return sum(
         float(e.data.get("cost_usd", 0.0))
-        for e in ledger.read(tool="fleet_dispatch", kind="usage")
+        for e in rows.read(ledger, "fleet_dispatch", "usage")
         if e.ts.startswith(day)
     )
 
@@ -246,7 +247,7 @@ def _spend_alert_sent_today(ledger: Ledger, *, today: str | None = None) -> bool
     day = today or datetime.now(UTC).strftime("%Y-%m-%d")
     return any(
         e.ts.startswith(day) and e.outcome == "success"
-        for e in ledger.read(tool="fleet_dispatch", kind="spend_alert")
+        for e in rows.read(ledger, "fleet_dispatch", "spend_alert")
     )
 
 
@@ -480,24 +481,24 @@ _TERMINAL_OUTCOMES = frozenset(
         "success",
         "needs_review",
         "no_changes",
-        "failed",
+        "failure",
         "blocked",
         "needs_human",
-        "deferred",
-        # my-coder's own vocabulary: "denied" (its Policy gate blocked the PR --
-        # unreachable today since fleet_dispatch doesn't pass --guarded, but
-        # recorded honestly if that ever changes) and "skipped" (the picked
-        # issue no longer exists, e.g. already closed by someone else).
-        "denied",
+        "paused",
+        # my-coder's "denied" (a human on the ask channel refused the PR, when the
+        # channel is armed with --ask-human)
+        # is "deny" in core's words, and "skipped" (the picked issue no longer exists, e.g.
+        # already closed by someone else).
+        "deny",
         "skipped",
     }
 )
-_RESUMABLE_OUTCOMES = frozenset({"needs_review", "no_changes", "failed", "deferred"})
-# Outcomes that count toward MAX_ATTEMPTS. "deferred" (a transient
+_RESUMABLE_OUTCOMES = frozenset({"needs_review", "no_changes", "failure", "paused"})
+# Outcomes that count toward MAX_ATTEMPTS. "paused" (a transient
 # infrastructure failure -- session/rate limit, network) is excluded: the issue
 # is fine, the fleet just couldn't run right then, so retrying it must not burn
 # the budget that escalates a genuinely-stuck issue to a human.
-_COUNTED_OUTCOMES = _TERMINAL_OUTCOMES - {"deferred"}
+_COUNTED_OUTCOMES = _TERMINAL_OUTCOMES - {"paused"}
 # Outcomes that mean a worker actually took an issue this run: it started, or it
 # reached some terminal verdict. Every *other* dispatch outcome
 # ("backlog_empty", "no_dispatchable_candidates", "halted_critical") is a note
@@ -538,32 +539,29 @@ class Attempt:
 def _last_attempt(ledger: Ledger, candidate_id: str) -> Attempt | None:
     entries = [
         e
-        for e in ledger
-        if e.tool == "fleet_dispatch"
-        and e.kind == "dispatch"
-        and e.outcome in _TERMINAL_OUTCOMES
-        and e.data.get("candidate") == candidate_id
+        for e in rows.read(ledger, "fleet_dispatch", "dispatch")
+        if e.outcome in _TERMINAL_OUTCOMES and e.data.get("candidate") == candidate_id
     ]
     if not entries:
         return None
     last = entries[-1]
     # attempt_number is the count that gates the human-escalation cap, so it
     # excludes transient runs -- a string of rate limits mustn't push a healthy
-    # issue to needs_human. That means "deferred" outcomes and, defensively, any
-    # "failed" entry whose message reads as transient (e.g. ones recorded before
+    # issue to needs_human. That means "paused" outcomes and, defensively, any
+    # "failure" entry whose message reads as transient (e.g. ones recorded before
     # transient classification existed, or by an older build).
     counted = sum(
         1
         for e in entries
         if e.outcome in _COUNTED_OUTCOMES
-        and not (e.outcome == "failed" and _is_transient_failure(e.data.get("final_message", "")))
+        and not (e.outcome == "failure" and _is_transient_failure(e.data.get("final_message", "")))
     )
 
     decisions = [
         e
         for e in ledger
         if e.tool == "mytelegrambot"
-        and e.kind == "blocker_decision"
+        and means(e, "blocker_decision")
         and e.data.get("candidate") == candidate_id
     ]
     has_human_retry = False
@@ -591,7 +589,7 @@ def _dispatch_decision(
     # "skip:needs_human".
     if attempt is None:
         return "fresh"
-    if attempt.outcome in ("success", "denied", "skipped"):
+    if attempt.outcome in ("success", "deny", "skipped"):
         # All three are considered stopping points, not transient misses:
         # denied re-hits the same policy wall every time, and a skipped issue
         # (already closed elsewhere) has nothing left to do.
@@ -602,8 +600,8 @@ def _dispatch_decision(
         return "skip:needs_human"
     if attempt.outcome == "blocked":
         return "skip:blocked" if blocker_open else "resume"
-    # needs_review / no_changes / failed / deferred -- resumable. The cap uses
-    # attempt_number, which already excludes deferred (transient) runs, so those
+    # needs_review / no_changes / failure / paused -- resumable. The cap uses
+    # attempt_number, which already excludes paused (transient) runs, so those
     # resume indefinitely without ever escalating a healthy issue to a human.
     if attempt.attempt_number >= max_attempts:
         return "skip:needs_human"
@@ -788,11 +786,12 @@ def _dispatch_one(
 
     _register_worker(account.name, candidate.id, repo)
     try:
-        ledger.record(
-            tool="fleet_dispatch",
-            kind="dispatch",
-            outcome="started",
-            detail=f"{account.name} -> {candidate.id} ({mode}) [{provider}]",
+        rows.record(
+            ledger,
+            "fleet_dispatch",
+            "dispatch",
+            "started",
+            f"{account.name} -> {candidate.id} ({mode}) [{provider}]",
             candidate=candidate.id,
             account=account.name,
             branch=branch,
@@ -840,10 +839,16 @@ def _dispatch_one(
             str(TRANSCRIPTS_DIR),
             "--json",
         ]
+        # my-coder asks a human before opening a PR. With the ask channel armed
+        # (--ask-human), that human is asked; unarmed, nobody could answer and the
+        # paid session would end with no PR, so the dispatch opens it unasked, as it
+        # always has -- and says so in the argv.
+        if not env.get("MYTHINGS_ASK_CMD", "").strip():
+            argv.append("--unguarded")
         # A backstop above my-coder's own internal session timeout: git/test
         # overhead around the session itself isn't bounded by --session-timeout-s,
         # so this catches a genuinely stuck `mycoder build` process rather than
-        # blocking the thread forever. Routed to "deferred" below, same as any
+        # blocking the thread forever. Routed to "paused" below, same as any
         # other transient infrastructure hiccup.
         timed_out = False
         try:
@@ -875,13 +880,12 @@ def _dispatch_one(
 
         # An explicit blocker signal and a wall-clock timeout both win over
         # everything else -- distinct outcomes from a real failure. Then mycoder's
-        # own structured outcome, translated 1:1 except "failure" (its name) ->
-        # "failed" (fleet_dispatch's own ledger vocabulary, unchanged since before
-        # this swap) and a transient-message reclassification to "deferred" so a
-        # session/rate-limit blip never counts toward MAX_ATTEMPTS.
+        # own structured outcome, passed through in core's words, with a
+        # transient-message reclassification to "paused" so a session/rate-limit
+        # blip never counts toward MAX_ATTEMPTS.
         if timed_out:
             outcome, msg = (
-                "deferred",
+                "paused",
                 f"deferred (transient): mycoder exceeded {session_timeout_s + 300:.0f}s wall-clock timeout",
             )
         elif mycoder_outcome is None:
@@ -889,16 +893,16 @@ def _dispatch_one(
             # problem, not a real assessment of the issue.
             tail = proc.stderr.strip()[-300:]
             if _is_transient_failure(tail):
-                outcome, msg = "deferred", f"deferred (transient): mycoder exited {proc.returncode}"
+                outcome, msg = "paused", f"deferred (transient): mycoder exited {proc.returncode}"
             else:
-                outcome, msg = "failed", f"mycoder exited {proc.returncode}: {tail or 'no output'}"
+                outcome, msg = "failure", f"mycoder exited {proc.returncode}: {tail or 'no output'}"
         elif mycoder_outcome == "blocked":
             outcome, msg = "blocked", detail
         elif mycoder_outcome == "failure":
             outcome, msg = (
-                ("deferred", f"deferred (transient): {detail}")
+                ("paused", f"deferred (transient): {detail}")
                 if _is_transient_failure(detail)
-                else ("failed", detail)
+                else ("failure", detail)
             )
         elif mycoder_outcome == "success":
             # A PR is open; ask CI whether it's actually mergeable by a human.
@@ -911,11 +915,12 @@ def _dispatch_one(
 
         note = f" (mycoder: {detail[:160]!r})" if detail and outcome != "success" else ""
         print(f"  [{account.name}] {mode}: {outcome} — {msg}{note}")
-        ledger.record(
-            tool="fleet_dispatch",
-            kind="dispatch",
-            outcome=outcome,
-            detail=f"{account.name} -> {candidate.id}: {msg}",
+        rows.record(
+            ledger,
+            "fleet_dispatch",
+            "dispatch",
+            outcome,
+            f"{account.name} -> {candidate.id}: {msg}",
             candidate=candidate.id,
             account=account.name,
             branch=branch,
@@ -931,11 +936,12 @@ def _dispatch_one(
             # available from mycoder's --json output (it would need parsing the
             # transcript file mycoder persists) -- a known, accepted gap, not an
             # oversight.
-            ledger.record(
-                tool="fleet_dispatch",
-                kind="usage",
-                outcome="success",
-                detail=f"{account.name} -> {candidate.id}: ${cost_usd:.4f}",
+            rows.record(
+                ledger,
+                "fleet_dispatch",
+                "usage",
+                "success",
+                f"{account.name} -> {candidate.id}: ${cost_usd:.4f}",
                 candidate=candidate.id,
                 account=account.name,
                 cost_usd=cost_usd,
@@ -1078,7 +1084,7 @@ def main(argv: list[str] | None = None) -> int:
         help="wall-clock seconds to allow a single headless claude session to "
         "run before killing it; complements --max-budget-usd/--max-turns, which "
         "bound spend and turn count but not a stalled/hung session (default: "
-        "1800 = 30 min). A timeout is recorded as 'deferred' (transient, "
+        "1800 = 30 min). A timeout is recorded as 'paused' (transient, "
         "resumable) rather than counted as a real failure.",
     )
     parser.add_argument(
@@ -1264,9 +1270,10 @@ def main(argv: list[str] | None = None) -> int:
         print("halted: critical issue(s) open, not dispatching new work:")
         for i, ref in zip(critical_issues, refs, strict=True):
             print(f"  - {ref}: {i['title']} ({i['url']})")
-        dispatch_ledger.record(
-            tool="fleet_dispatch",
-            kind="dispatch",
+        rows.record(
+            dispatch_ledger,
+            "fleet_dispatch",
+            "dispatch",
             outcome="halted_critical",
             detail=f"{len(refs)} critical issue(s) open: {', '.join(refs)}",
             issues=refs,
@@ -1339,9 +1346,10 @@ def main(argv: list[str] | None = None) -> int:
                     f"{c.id}: gave up after {prior.attempt_number} attempts "
                     f"(last outcome: {prior.outcome})"
                 )
-                dispatch_ledger.record(
-                    tool="fleet_dispatch",
-                    kind="dispatch",
+                rows.record(
+                    dispatch_ledger,
+                    "fleet_dispatch",
+                    "dispatch",
                     outcome="needs_human",
                     detail=detail,
                     candidate=c.id,
@@ -1399,16 +1407,18 @@ def main(argv: list[str] | None = None) -> int:
                                 f"(${spent_today:.2f} + ${args.max_budget_usd:.2f} > ${effective_cap:.2f})"
                             )
                             break
-                        if projected >= args.spend_alert_fraction * effective_cap and not _spend_alert_sent_today(
-                            dispatch_ledger
+                        if (
+                            projected >= args.spend_alert_fraction * effective_cap
+                            and not _spend_alert_sent_today(dispatch_ledger)
                         ):
                             raise_to = round(effective_cap * 1.5, 2)
                             sent = fleet_ask.alert_spend(
                                 spent=spent_today, cap=effective_cap, raise_to=raise_to
                             )
-                            dispatch_ledger.record(
-                                tool="fleet_dispatch",
-                                kind="spend_alert",
+                            rows.record(
+                                dispatch_ledger,
+                                "fleet_dispatch",
+                                "spend_alert",
                                 outcome="success" if sent else "failure",
                                 detail=f"spend alert: ${spent_today:.2f}/${effective_cap:.2f} "
                                 f"({args.spend_alert_fraction:.0%} threshold)",
@@ -1470,9 +1480,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if not dispatched_candidates:
         if candidates_pool:
-            dispatch_ledger.record(
-                tool="fleet_dispatch",
-                kind="dispatch",
+            rows.record(
+                dispatch_ledger,
+                "fleet_dispatch",
+                "dispatch",
                 outcome="no_dispatchable_candidates",
                 detail=(
                     f"considered {len(candidates_pool)} candidate(s) from backlog, "
@@ -1481,9 +1492,10 @@ def main(argv: list[str] | None = None) -> int:
                 skipped_scaffolds=[c.id for c in skipped],
             )
         else:
-            dispatch_ledger.record(
-                tool="fleet_dispatch",
-                kind="dispatch",
+            rows.record(
+                dispatch_ledger,
+                "fleet_dispatch",
+                "dispatch",
                 outcome="backlog_empty",
                 detail="no candidates in backlog",
             )

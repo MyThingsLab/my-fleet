@@ -92,9 +92,7 @@ def pr_order_within_repo(prs: list[PR]) -> list[PR]:
     placed: set[int] = set()
     while remaining:
         ready = [
-            pr
-            for pr in remaining
-            if pr.base not in by_head or by_head[pr.base].number in placed
+            pr for pr in remaining if pr.base not in by_head or by_head[pr.base].number in placed
         ]
         if not ready:
             ready = remaining[:1]  # cycle guard

@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 import myfleet.fleet_cycle as fc
+import myfleet.rows as rows
 
 
 @pytest.fixture(autouse=True)
@@ -423,10 +427,10 @@ def test_build_tick_records_only_the_build_heartbeat(
     ledger_path = tmp_path / "ledger.jsonl"
     monkeypatch.setattr(fc, "DISPATCH_LEDGER", ledger_path)
     monkeypatch.setattr(fc, "WORKSPACE_ROOT", tmp_path)
-    fc.main(
-        ["--accounts", "/tmp/acct", "--execute", "--brief-count", "0", "--skip-bookkeeping"]
-    )
-    ticks = [e.data.get("tick") for e in fc.Ledger(ledger_path).read(tool="fleet_cycle", kind="heartbeat")]
+    fc.main(["--accounts", "/tmp/acct", "--execute", "--brief-count", "0", "--skip-bookkeeping"])
+    ticks = [
+        e.data.get("tick") for e in rows.read(fc.Ledger(ledger_path), "fleet_cycle", "heartbeat")
+    ]
     assert ticks == ["build"]
 
 
@@ -438,7 +442,9 @@ def test_bookkeeping_tick_records_only_the_bookkeeping_heartbeat(
     monkeypatch.setattr(fc, "DISPATCH_LEDGER", ledger_path)
     monkeypatch.setattr(fc, "WORKSPACE_ROOT", tmp_path)
     fc.main(["--accounts", "/tmp/acct", "--skip-dispatch", "--execute", "--brief-count", "0"])
-    ticks = [e.data.get("tick") for e in fc.Ledger(ledger_path).read(tool="fleet_cycle", kind="heartbeat")]
+    ticks = [
+        e.data.get("tick") for e in rows.read(fc.Ledger(ledger_path), "fleet_cycle", "heartbeat")
+    ]
     assert ticks == ["bookkeeping"]
 
 
@@ -450,7 +456,9 @@ def test_a_full_cycle_records_both_heartbeats(
     monkeypatch.setattr(fc, "DISPATCH_LEDGER", ledger_path)
     monkeypatch.setattr(fc, "WORKSPACE_ROOT", tmp_path)
     fc.main(["--accounts", "/tmp/acct", "--execute", "--brief-count", "0"])
-    ticks = {e.data.get("tick") for e in fc.Ledger(ledger_path).read(tool="fleet_cycle", kind="heartbeat")}
+    ticks = {
+        e.data.get("tick") for e in rows.read(fc.Ledger(ledger_path), "fleet_cycle", "heartbeat")
+    }
     assert ticks == {"build", "bookkeeping"}
 
 
@@ -468,7 +476,9 @@ def test_halted_cycle_still_records_a_heartbeat(
     monkeypatch.setattr(fc, "HALT_MARKER", marker)
     fc.main(["--accounts", "/tmp/acct", "--execute", "--skip-dispatch", "--brief-count", "0"])
     assert calls == []
-    ticks = {e.data.get("tick") for e in fc.Ledger(ledger_path).read(tool="fleet_cycle", kind="heartbeat")}
+    ticks = {
+        e.data.get("tick") for e in rows.read(fc.Ledger(ledger_path), "fleet_cycle", "heartbeat")
+    }
     assert ticks == {"bookkeeping"}
 
 
@@ -581,7 +591,9 @@ def test_next_backoff_doubles_and_caps_when_idle() -> None:
     )
 
 
-@pytest.mark.parametrize("idle_outcome", ["backlog_empty", "no_dispatchable_candidates", "halted_critical"])
+@pytest.mark.parametrize(
+    "idle_outcome", ["backlog_empty", "no_dispatchable_candidates", "halted_critical"]
+)
 def test_an_idle_dispatch_entry_still_backs_off_and_sleeps(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, idle_outcome: str
 ) -> None:
@@ -617,9 +629,7 @@ def test_an_idle_dispatch_entry_still_backs_off_and_sleeps(
         iterations += 1
         if iterations > 4:
             raise _StopLoop
-        ledger.record(
-            tool="fleet_dispatch", kind="dispatch", outcome=idle_outcome, detail=""
-        )
+        rows.record(ledger, "fleet_dispatch", "dispatch", idle_outcome)
         return 0
 
     monkeypatch.setattr(fc, "_run_cycle", fake_run_cycle)
@@ -656,7 +666,7 @@ def test_a_real_dispatch_resets_the_backoff_to_the_floor(
         iterations += 1
         if iterations > 3:
             raise _StopLoop
-        ledger.record(tool="fleet_dispatch", kind="dispatch", outcome="started", detail="")
+        rows.record(ledger, "fleet_dispatch", "dispatch", "started")
         return 0
 
     monkeypatch.setattr(fc, "_run_cycle", fake_run_cycle)
@@ -671,12 +681,12 @@ def test_a_real_dispatch_resets_the_backoff_to_the_floor(
 def test_work_entry_count_ignores_the_idle_notes(tmp_path: Path) -> None:
     ledger = fc.Ledger(tmp_path / "ledger.jsonl")
     for outcome in ("backlog_empty", "no_dispatchable_candidates", "halted_critical"):
-        ledger.record(tool="fleet_dispatch", kind="dispatch", outcome=outcome, detail="")
-    ledger.record(tool="fleet_dispatch", kind="usage", outcome="success", detail="", cost_usd=1.0)
+        rows.record(ledger, "fleet_dispatch", "dispatch", outcome)
+    rows.record(ledger, "fleet_dispatch", "usage", "success", cost_usd=1.0)
     assert fc._work_entry_count(ledger) == 0
 
-    ledger.record(tool="fleet_dispatch", kind="dispatch", outcome="started", detail="")
-    ledger.record(tool="fleet_dispatch", kind="dispatch", outcome="success", detail="")
+    rows.record(ledger, "fleet_dispatch", "dispatch", "started")
+    rows.record(ledger, "fleet_dispatch", "dispatch", "success")
     assert fc._work_entry_count(ledger) == 2
 
 
@@ -709,16 +719,14 @@ def test_run_loop_stops_at_budget_cap(monkeypatch: pytest.MonkeyPatch, tmp_path:
     def fake_run_cycle(
         args: argparse.Namespace, *, accounts: str, skip_dispatch: bool, py: str
     ) -> None:
-        ledger.record(
-            tool="fleet_dispatch", kind="usage", outcome="success", detail="", cost_usd=2.0
-        )
+        rows.record(ledger, "fleet_dispatch", "usage", "success", cost_usd=2.0)
 
     monkeypatch.setattr(fc, "_run_cycle", fake_run_cycle)
     monkeypatch.setattr(fc.account_usage, "select_accounts", lambda pool, pct: _usable(pool))
 
     result = fc._run_loop(_loop_ns(max_cycle_budget_usd=3.0), "python3")
     assert result == 0
-    spent = sum(e.data["cost_usd"] for e in ledger.read(tool="fleet_dispatch", kind="usage"))
+    spent = sum(e.data["cost_usd"] for e in rows.read(ledger, "fleet_dispatch", "usage"))
     assert spent >= 3.0
 
 
@@ -843,8 +851,8 @@ def test_loop_records_a_blocked_account_as_preflight_not_a_session_failure(
     with pytest.raises(_StopLoop):
         fc._run_loop(_loop_ns(), "python3")
 
-    entries = fc.Ledger(ledger_path).read(tool="fleet_cycle", kind="preflight")
-    assert [e.outcome for e in entries] == ["auth_expired"]
+    entries = rows.read(fc.Ledger(ledger_path), "fleet_cycle", "preflight")
+    assert [rows.word_of(e) for e in entries] == ["auth_expired"]
     assert "/tmp/acct1" in entries[0].detail
 
 
@@ -895,9 +903,9 @@ def test_loop_disarms_ask_channel_once_when_daemon_dies(
     assert "MYTHINGS_ASK_TIMEOUT" not in os.environ
     assert "channel disarmed" in capsys.readouterr().out
     ledger = fc.Ledger(tmp_path / "ledger.jsonl")
-    disarms = [e for e in ledger.read(tool="fleet_cycle", kind="ask_channel")]
+    disarms = rows.read(ledger, "fleet_cycle", "ask_channel")
     assert len(disarms) == 1  # once per transition, not once per iteration
-    assert disarms[0].outcome == "disarmed"
+    assert rows.word_of(disarms[0]) == "disarmed"
 
 
 def test_loop_rearms_ask_channel_when_daemon_returns(
@@ -920,7 +928,7 @@ def test_loop_rearms_ask_channel_when_daemon_returns(
     out = capsys.readouterr().out
     assert "channel disarmed" in out and "re-armed" in out
     ledger = fc.Ledger(tmp_path / "ledger.jsonl")
-    outcomes = [e.outcome for e in ledger.read(tool="fleet_cycle", kind="ask_channel")]
+    outcomes = [rows.word_of(e) for e in rows.read(ledger, "fleet_cycle", "ask_channel")]
     assert outcomes == ["disarmed", "rearmed"]
 
 
@@ -1027,7 +1035,7 @@ def _failing_stage_cycle(
     monkeypatch.setattr(fc, "WORKSPACE_ROOT", tmp_path)
     argv = ["--accounts", "/tmp/acct", "--skip-dispatch", "--execute", "--brief-count", "0"]
     rc = fc.main([*argv, "-j", str(concurrency)])
-    return rc, fc.Ledger(ledger_path).read(tool="fleet_cycle", kind="cycle")
+    return rc, rows.read(fc.Ledger(ledger_path), "fleet_cycle", "cycle")
 
 
 @pytest.mark.parametrize("concurrency", [1, 4])
@@ -1043,7 +1051,7 @@ def test_a_failing_stage_makes_the_cycle_report_failure(
     )
 
     assert rc == 1
-    assert [e.outcome for e in entries] == ["stage_failed"]
+    assert [rows.word_of(e) for e in entries] == ["stage_failed"]
     assert entries[0].data.get("failed_stages") == ["myprojector"]
     assert "rc=3" in entries[0].detail
 
@@ -1054,7 +1062,7 @@ def test_a_clean_cycle_records_ok(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     )
 
     assert rc == 0
-    assert [e.outcome for e in entries] == ["ok"]
+    assert [rows.word_of(e) for e in entries] == ["ok"]
 
 
 def test_a_raising_stage_fails_the_cycle_without_aborting_later_stages(
@@ -1076,13 +1084,11 @@ def test_a_raising_stage_fails_the_cycle_without_aborting_later_stages(
     monkeypatch.setattr(fc, "DISPATCH_LEDGER", ledger_path)
     monkeypatch.setattr(fc, "WORKSPACE_ROOT", tmp_path)
 
-    rc = fc.main(
-        ["--accounts", "/tmp/acct", "--skip-dispatch", "--execute", "--brief-count", "0"]
-    )
+    rc = fc.main(["--accounts", "/tmp/acct", "--skip-dispatch", "--execute", "--brief-count", "0"])
 
     assert rc == 1
-    entries = fc.Ledger(ledger_path).read(tool="fleet_cycle", kind="cycle")
-    assert [e.outcome for e in entries] == ["stage_failed"]
+    entries = rows.read(fc.Ledger(ledger_path), "fleet_cycle", "cycle")
+    assert [rows.word_of(e) for e in entries] == ["stage_failed"]
     # myreporter comes after myprojector in the graph; it still ran.
     assert "myreporter" in ran
 
@@ -1100,8 +1106,8 @@ def test_a_halted_cycle_is_recorded_as_halted_not_ok(
     rc = fc.main(["--accounts", "/tmp/acct", "--execute", "--skip-dispatch", "--brief-count", "0"])
 
     assert rc == 0
-    entries = fc.Ledger(ledger_path).read(tool="fleet_cycle", kind="cycle")
-    assert [e.outcome for e in entries] == ["halted"]
+    entries = rows.read(fc.Ledger(ledger_path), "fleet_cycle", "cycle")
+    assert [rows.word_of(e) for e in entries] == ["halted"]
 
 
 def test_docs_stage_skips_when_mydocs_is_not_installed(
@@ -1125,7 +1131,14 @@ def test_docs_stage_skips_when_mydocs_is_not_installed(
 
 
 def test_stage_dispatch_passes_provider() -> None:
-    args = _loop_ns(provider="gemini", dispatch_execute=False, allow_personal_token=False, app_id=None, app_installation_id=None, app_private_key=None)
+    args = _loop_ns(
+        provider="gemini",
+        dispatch_execute=False,
+        allow_personal_token=False,
+        app_id=None,
+        app_installation_id=None,
+        app_private_key=None,
+    )
     ctx = fc._Ctx(args=args, accounts="/tmp/acct", skip_dispatch=False, py="python3")
     stages = fc._stage_dispatch(ctx)
     assert len(stages) == 1
@@ -1147,3 +1160,42 @@ def test_main_provider_flag_passed(monkeypatch: pytest.MonkeyPatch) -> None:
     assert captured["provider"] == "gemini"
 
 
+def _lab_stage_prefixes() -> list[tuple[str, ...]]:
+    ctx = fc._Ctx(
+        args=SimpleNamespace(
+            engine="noop",
+            execute=False,
+            dispatch_execute=False,
+            allow_personal_token=False,
+            app_id=None,
+            app_installation_id=None,
+            app_private_key=None,
+            provider="claude",
+            ask_human=False,
+            brief_count=0,
+        ),
+        accounts="/tmp/acct",
+        skip_dispatch=False,
+        py=sys.executable,
+    )
+    prefixes: list[tuple[str, ...]] = []
+    for resolver in fc.RESOLVERS.values():
+        for stage in resolver(ctx):
+            if stage.skip is not None or stage.argv[0] == sys.executable:
+                continue
+            prefix = tuple(stage.argv[:2])
+            if prefix not in prefixes:
+                prefixes.append(prefix)
+    return prefixes
+
+
+@pytest.mark.parametrize("prefix", _lab_stage_prefixes(), ids=lambda p: " ".join(p))
+def test_every_lab_stage_subcommand_accepts_help(prefix: tuple[str, ...]) -> None:
+    venv_bin = Path(sys.executable).parent
+    if shutil.which(prefix[0], path=str(venv_bin)) is None:
+        pytest.skip(f"{prefix[0]} is not installed in {venv_bin}")
+    env = {**os.environ, "PATH": f"{venv_bin}{os.pathsep}{os.environ.get('PATH', '')}"}
+    result = subprocess.run(
+        [*prefix, "--help"], env=env, capture_output=True, text=True, timeout=60, check=False
+    )
+    assert result.returncode == 0, result.stderr

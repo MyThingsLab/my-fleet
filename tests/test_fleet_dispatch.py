@@ -12,6 +12,7 @@ import pytest
 from mythings.ledger import Ledger, LedgerEntry
 
 import myfleet.fleet_dispatch as fd
+import myfleet.rows as rows
 from myfleet.fleet_usage import family_for
 
 # Captured before any test monkeypatches fd.subprocess.run -- fakes that only
@@ -25,7 +26,6 @@ _REAL_SUBPROCESS_RUN = subprocess.run
 def _isolate_dispatch_ledger(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(fd, "DISPATCH_LEDGER", tmp_path / "ledger.jsonl")
     monkeypatch.setattr(fd, "HALT_MARKER", tmp_path / "HALT")
-
 
 
 def _init_git_repo(path: Path) -> None:
@@ -270,7 +270,8 @@ def test_main_halts_dispatch_when_critical_issue_open(tmp_path: Path, monkeypatc
     assert "my-things-core#5" in out
 
     entries = list(Ledger(fd.DISPATCH_LEDGER))
-    assert entries[-1].outcome == "halted_critical"
+    assert entries[-1].outcome == "halted"
+    assert rows.word_of(entries[-1]) == "halted_critical"
 
 
 def test_main_skips_issue_with_open_pr_in_flight(tmp_path: Path, monkeypatch) -> None:
@@ -369,9 +370,9 @@ def test_family_for_readonly_vs_mutation(command: str, expected: str | None) -> 
         (fd.Attempt("i#1", "blocked", "b", 1, blocker="o/r#2"), False, "resume"),
         (fd.Attempt("i#1", "needs_review", "b", 1), False, "resume"),
         (fd.Attempt("i#1", "no_changes", "b", 2), False, "resume"),
-        (fd.Attempt("i#1", "failed", "b", 3), False, "skip:needs_human"),  # hit the cap
+        (fd.Attempt("i#1", "failure", "b", 3), False, "skip:needs_human"),  # hit the cap
         # my-coder's own vocabulary: both are stopping points, never resumed.
-        (fd.Attempt("i#1", "denied", "b", 1), False, "skip:done"),
+        (fd.Attempt("i#1", "deny", "b", 1), False, "skip:done"),
         (fd.Attempt("i#1", "skipped", "b", 1), False, "skip:done"),
     ],
 )
@@ -381,8 +382,9 @@ def test_dispatch_decision(attempt, blocker_open: bool, expected: str) -> None:
 
 def test_last_attempt_reads_latest_terminal_and_counts_attempts(tmp_path: Path) -> None:
     led = Ledger(tmp_path / "l.jsonl")
-    led.record("fleet_dispatch", "dispatch", "started", candidate="r#1", branch="b")
-    led.record(
+    rows.record(led, "fleet_dispatch", "dispatch", "started", candidate="r#1", branch="b")
+    rows.record(
+        led,
         "fleet_dispatch",
         "dispatch",
         "no_changes",
@@ -390,9 +392,11 @@ def test_last_attempt_reads_latest_terminal_and_counts_attempts(tmp_path: Path) 
         branch="b",
         final_message="stuck on ls",
     )
-    led.record("fleet_dispatch", "dispatch", "started", candidate="r#1", branch="b")
-    led.record("fleet_dispatch", "dispatch", "needs_review", candidate="r#1", branch="b", commits=1)
-    led.record("fleet_dispatch", "dispatch", "success", candidate="other#2", branch="b2")
+    rows.record(led, "fleet_dispatch", "dispatch", "started", candidate="r#1", branch="b")
+    rows.record(
+        led, "fleet_dispatch", "dispatch", "needs_review", candidate="r#1", branch="b", commits=1
+    )
+    rows.record(led, "fleet_dispatch", "dispatch", "success", candidate="other#2", branch="b2")
 
     a = fd._last_attempt(led, "r#1")
     assert a is not None
@@ -418,34 +422,36 @@ def test_is_transient_failure(message: str, expected: bool) -> None:
 
 def test_transient_failures_do_not_count_toward_attempt_cap(tmp_path: Path) -> None:
     led = Ledger(tmp_path / "l.jsonl")
-    # Two transient (deferred) runs and one real failure.
-    led.record("fleet_dispatch", "dispatch", "deferred", candidate="r#1", branch="b")
-    led.record("fleet_dispatch", "dispatch", "failed", candidate="r#1", branch="b")
-    led.record("fleet_dispatch", "dispatch", "deferred", candidate="r#1", branch="b")
+    # Two transient (paused) runs and one real failure.
+    rows.record(led, "fleet_dispatch", "dispatch", "paused", candidate="r#1", branch="b")
+    rows.record(led, "fleet_dispatch", "dispatch", "failure", candidate="r#1", branch="b")
+    rows.record(led, "fleet_dispatch", "dispatch", "paused", candidate="r#1", branch="b")
 
     a = fd._last_attempt(led, "r#1")
     assert a is not None
-    assert a.outcome == "deferred"  # latest
-    assert a.attempt_number == 1  # only the real "failed" counts, not the two deferred
+    assert a.outcome == "paused"  # latest
+    assert a.attempt_number == 1  # only the real "failure" counts, not the two paused
 
 
 def test_failed_entry_with_transient_message_does_not_count(tmp_path: Path) -> None:
-    # Defends against "failed" entries recorded before transient classification
-    # existed (exactly the two rate-limited #17 runs in the live ledger): a
-    # failure whose message is transient must not count toward the cap.
+    # Defends against failures recorded before transient classification existed
+    # (exactly the two rate-limited #17 runs in the live ledger, written under the
+    # old "failed" word): a failure whose message is transient must not count.
     led = Ledger(tmp_path / "l.jsonl")
-    led.record(
+    rows.record(
+        led,
         "fleet_dispatch",
         "dispatch",
-        "failed",
+        "failure",
         candidate="r#1",
         branch="b",
         final_message="You've hit your session limit · resets 6pm",
     )
-    led.record(
+    rows.record(
+        led,
         "fleet_dispatch",
         "dispatch",
-        "failed",
+        "failure",
         candidate="r#1",
         branch="b",
         final_message="You've hit your session limit · resets 6pm",
@@ -459,7 +465,7 @@ def test_failed_entry_with_transient_message_does_not_count(tmp_path: Path) -> N
 def test_dispatch_decision_deferred_always_resumes() -> None:
     # Even a long string of transient deferrals never escalates to a human,
     # because attempt_number excludes them (here it's 0).
-    deferred = fd.Attempt("r#1", "deferred", "b", 0)
+    deferred = fd.Attempt("r#1", "paused", "b", 0)
     assert fd._dispatch_decision(deferred, blocker_open=False, max_attempts=3) == "resume"
 
 
@@ -467,8 +473,21 @@ def test_human_telegram_retry_resumes_needs_human_candidate(tmp_path: Path) -> N
     # Issue my-fleet#65: When an operator taps "Retry" on a blocker escalation,
     # blocker_decision outcome="retry" entry allows the candidate to resume.
     led = Ledger(tmp_path / "l.jsonl")
-    led.record("fleet_dispatch", "dispatch", "needs_human", candidate="r#65", branch="b")
-    led.record("mytelegrambot", "blocker_decision", "retry", candidate="r#65", detail="retry from chat")
+    rows.record(led, "fleet_dispatch", "dispatch", "needs_human", candidate="r#65", branch="b")
+    # mytelegrambot's own writer predates core's strict check, so its row is written as it sits on disk.
+    with led.path.open("a") as fh:
+        fh.write(
+            json.dumps(
+                {
+                    "tool": "mytelegrambot",
+                    "kind": "blocker_decision",
+                    "outcome": "retry",
+                    "detail": "retry from chat",
+                    "data": {"candidate": "r#65"},
+                }
+            )
+            + "\n"
+        )
 
     attempt = fd._last_attempt(led, "r#65")
     assert attempt is not None
@@ -532,7 +551,7 @@ def test_main_resumes_or_skips_by_prior_attempt(
     attempts = {
         "r#1": fd.Attempt("r#1", "needs_review", "b1", 1),
         "r#2": fd.Attempt("r#2", "blocked", "b2", 1, blocker="MyThingsLab/core#9"),
-        "r#3": fd.Attempt("r#3", "failed", "b3", 3),  # at the attempt cap
+        "r#3": fd.Attempt("r#3", "failure", "b3", 3),  # at the attempt cap
     }
     monkeypatch.setattr(fd, "_last_attempt", lambda ledger, cid: attempts.get(cid))
     monkeypatch.setattr(fd, "_issue_is_open", lambda ref: True)  # r#2's blocker still open
@@ -789,11 +808,11 @@ def test_main_dry_run_still_reports_when_halted(tmp_path: Path, monkeypatch, cap
 def _usage_entry(ledger: Ledger, *, cost_usd: float, ts: str) -> None:
     ledger.append(
         LedgerEntry(
-            tool="fleet_dispatch",
-            kind="usage",
+            tool=rows.TOOL,
+            kind="metric",
             outcome="success",
             ts=ts,
-            data={"cost_usd": cost_usd},
+            data={"component": "fleet_dispatch", "type": "usage", "cost_usd": cost_usd},
         )
     )
 
@@ -809,7 +828,7 @@ def test_today_spend_usd_sums_only_todays_usage_entries(tmp_path: Path) -> None:
 
 def test_today_spend_usd_ignores_non_usage_entries(tmp_path: Path) -> None:
     ledger = Ledger(tmp_path / "ledger.jsonl")
-    ledger.record(tool="fleet_dispatch", kind="dispatch", outcome="success", cost_usd=50.0)
+    rows.record(ledger, "fleet_dispatch", "dispatch", "success", cost_usd=50.0)
 
     assert fd._today_spend_usd(ledger, today="2026-07-10") == 0.0
 
@@ -960,21 +979,33 @@ def test_spend_alert_sent_today_true_only_for_successful_same_day_entry(
     ledger = Ledger(tmp_path / "ledger.jsonl")
     ledger.append(
         LedgerEntry(
-            tool="fleet_dispatch", kind="spend_alert", outcome="failure", ts="2026-07-12T01:00:00Z"
+            tool=rows.TOOL,
+            kind="alert",
+            outcome="failure",
+            ts="2026-07-12T01:00:00Z",
+            data={"component": "fleet_dispatch", "type": "spend_alert"},
         )
     )
     assert fd._spend_alert_sent_today(ledger, today="2026-07-12") is False
 
     ledger.append(
         LedgerEntry(
-            tool="fleet_dispatch", kind="spend_alert", outcome="success", ts="2026-07-11T01:00:00Z"
+            tool=rows.TOOL,
+            kind="alert",
+            outcome="success",
+            ts="2026-07-11T01:00:00Z",
+            data={"component": "fleet_dispatch", "type": "spend_alert"},
         )
     )
     assert fd._spend_alert_sent_today(ledger, today="2026-07-12") is False
 
     ledger.append(
         LedgerEntry(
-            tool="fleet_dispatch", kind="spend_alert", outcome="success", ts="2026-07-12T02:00:00Z"
+            tool=rows.TOOL,
+            kind="alert",
+            outcome="success",
+            ts="2026-07-12T02:00:00Z",
+            data={"component": "fleet_dispatch", "type": "spend_alert"},
         )
     )
     assert fd._spend_alert_sent_today(ledger, today="2026-07-12") is True
@@ -1033,7 +1064,7 @@ def test_main_pushes_spend_alert_once_when_threshold_crossed(tmp_path: Path, mon
     assert alert_calls[0]["spent"] == pytest.approx(17.0)
     assert alert_calls[0]["cap"] == pytest.approx(20.0)
 
-    entries = ledger.read(tool="fleet_dispatch", kind="spend_alert")
+    entries = rows.read(ledger, "fleet_dispatch", "spend_alert")
     assert len(entries) == 1
     assert entries[0].outcome == "success"
 
@@ -1044,9 +1075,7 @@ def test_main_does_not_repush_spend_alert_same_day(tmp_path: Path, monkeypatch) 
     ledger = Ledger(dispatch_ledger_path)
     today = datetime.now(fd.UTC).strftime("%Y-%m-%d")
     _usage_entry(ledger, cost_usd=17.0, ts=f"{today}T00:00:00Z")
-    ledger.record(
-        tool="fleet_dispatch", kind="spend_alert", outcome="success", detail="already sent"
-    )
+    rows.record(ledger, "fleet_dispatch", "spend_alert", "success", "already sent")
 
     monkeypatch.setattr(fd.subprocess, "run", _gh_identity_stub())
     monkeypatch.setattr(fd, "_dispatch_one", _dispatch_stub([]))
@@ -1095,7 +1124,7 @@ def test_main_escalates_blocker_on_needs_human(tmp_path: Path, monkeypatch) -> N
     monkeypatch.setattr(fd, "_open_pr_number", lambda *a, **k: None)
     stuck = fd.Attempt(
         candidate_id="repo#1",
-        outcome="failed",
+        outcome="failure",
         branch="fleet-dispatch/repo-1",
         attempt_number=fd.MAX_ATTEMPTS,
         blocker=None,
@@ -1493,6 +1522,7 @@ def test_dispatch_one_dry_run_never_calls_mycoder(tmp_path: Path, monkeypatch) -
 
 def test_dispatch_one_builds_mycoder_argv(tmp_path: Path, monkeypatch) -> None:
     candidate, account, ledger = _setup_dispatch_one_repo(tmp_path, monkeypatch)
+    monkeypatch.delenv("MYTHINGS_ASK_CMD", raising=False)
     captured = {}
 
     def fake_run(argv, **kwargs):
@@ -1527,6 +1557,30 @@ def test_dispatch_one_builds_mycoder_argv(tmp_path: Path, monkeypatch) -> None:
     assert "--run-tests" in argv
     assert "--json" in argv
     assert captured["env"]["CLAUDE_CONFIG_DIR"] == str(account.config_dir)
+    # no ask channel armed: nobody could approve the PR, so it is opened unasked, by name
+    assert argv[-1] == "--unguarded"
+
+
+def test_dispatch_one_lets_mycoder_ask_when_the_channel_is_armed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    candidate, account, ledger = _setup_dispatch_one_repo(tmp_path, monkeypatch)
+    monkeypatch.setenv("MYTHINGS_ASK_CMD", "mytelegrambot ask")
+    captured = {}
+
+    def fake_run(argv, **kwargs):
+        if argv[0] == "mycoder":
+            captured["argv"] = argv
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=json.dumps({"outcome": "no_changes", "detail": "nothing to do"})
+            )
+        return _REAL_SUBPROCESS_RUN(argv, **kwargs)
+
+    monkeypatch.setattr(fd.subprocess, "run", fake_run)
+    fd._dispatch_one(account, candidate, execute=True, max_budget_usd=2.5, max_turns=15,
+                     ledger=ledger, org="MyThingsLab", session_timeout_s=900.0)  # fmt: skip
+
+    assert "--unguarded" not in captured["argv"]  # a human approves the PR
 
 
 @pytest.mark.parametrize(
@@ -1534,7 +1588,7 @@ def test_dispatch_one_builds_mycoder_argv(tmp_path: Path, monkeypatch) -> None:
     [
         ("no_changes", "no_changes"),
         ("needs_review", "needs_review"),
-        ("denied", "denied"),
+        ("denied", "deny"),
         ("skipped", "skipped"),
     ],
 )
@@ -1577,7 +1631,7 @@ def test_dispatch_one_translates_failure_to_failed(tmp_path: Path, monkeypatch) 
     )
 
     (entry,) = [e for e in ledger.read() if e.kind == "dispatch" and e.outcome != "started"]
-    assert entry.outcome == "failed"
+    assert entry.outcome == "failure"
 
 
 def test_dispatch_one_reclassifies_transient_failure_as_deferred(
@@ -1601,7 +1655,7 @@ def test_dispatch_one_reclassifies_transient_failure_as_deferred(
     )
 
     (entry,) = [e for e in ledger.read() if e.kind == "dispatch" and e.outcome != "started"]
-    assert entry.outcome == "deferred"
+    assert entry.outcome == "paused"
 
 
 def test_dispatch_one_records_blocker_from_mycoder_result(tmp_path: Path, monkeypatch) -> None:
@@ -1685,7 +1739,7 @@ def test_dispatch_one_records_deferred_on_timeout(tmp_path: Path, monkeypatch) -
     )
 
     (entry,) = [e for e in ledger.read() if e.kind == "dispatch" and e.outcome != "started"]
-    assert entry.outcome == "deferred"
+    assert entry.outcome == "paused"
     assert "wall-clock timeout" in entry.detail
 
 
@@ -1714,7 +1768,7 @@ def test_dispatch_one_treats_unparseable_mycoder_output_as_failed(
     )
 
     (entry,) = [e for e in ledger.read() if e.kind == "dispatch" and e.outcome != "started"]
-    assert entry.outcome == "failed"
+    assert entry.outcome == "failure"
 
 
 def test_dispatch_one_records_minimal_usage_entry(tmp_path: Path, monkeypatch) -> None:
@@ -1735,7 +1789,7 @@ def test_dispatch_one_records_minimal_usage_entry(tmp_path: Path, monkeypatch) -
         org="MyThingsLab",
     )
 
-    (usage,) = [e for e in ledger.read() if e.kind == "usage"]
+    (usage,) = rows.read(ledger, "fleet_dispatch", "usage")
     assert usage.data["cost_usd"] == 0.42
 
 
@@ -1813,8 +1867,8 @@ def test_main_records_no_dispatchable_candidates_when_only_scaffolds(
     assert rc == 0
 
     ledger = Ledger(dispatch_ledger_path)
-    entries = ledger.read(tool="fleet_dispatch")
-    assert any(e.outcome == "no_dispatchable_candidates" for e in entries)
+    entries = rows.read(ledger, "fleet_dispatch", "dispatch")
+    assert any(rows.word_of(e) == "no_dispatchable_candidates" for e in entries)
 
 
 def test_main_records_backlog_empty_when_no_candidates(tmp_path: Path, monkeypatch) -> None:
@@ -1835,8 +1889,8 @@ def test_main_records_backlog_empty_when_no_candidates(tmp_path: Path, monkeypat
     assert rc == 0
 
     ledger = Ledger(dispatch_ledger_path)
-    entries = ledger.read(tool="fleet_dispatch")
-    assert any(e.outcome == "backlog_empty" for e in entries)
+    entries = rows.read(ledger, "fleet_dispatch", "dispatch")
+    assert any(rows.word_of(e) == "backlog_empty" for e in entries)
 
 
 def test_dispatch_one_uses_gemini_runner_when_provider_is_gemini(
@@ -2011,6 +2065,7 @@ def test_ensure_repo_graph_builds_and_caches(tmp_path: Path) -> None:
     assert meta["commit_sha"] == head_sha
 
     from mythings.graph import CodebaseGraph
+
     graph = CodebaseGraph(db_path)
     symbols = graph.find_symbols("do_work")
     assert len(symbols) == 1
@@ -2022,7 +2077,9 @@ def test_ensure_repo_graph_builds_and_caches(tmp_path: Path) -> None:
     assert db_path_cached == db_path
 
     # New commit updates cache
-    (pkg_dir / "worker.py").write_text("def do_work() -> int:\n    return 100\ndef new_fn(): pass\n")
+    (pkg_dir / "worker.py").write_text(
+        "def do_work() -> int:\n    return 100\ndef new_fn(): pass\n"
+    )
     subprocess.run(["git", "-C", str(repo_path), "add", "."], check=True)
     subprocess.run(["git", "-C", str(repo_path), "commit", "-qm", "update"], check=True)
     new_sha = subprocess.run(
@@ -2083,9 +2140,7 @@ def test_dispatch_one_injects_graph_path(tmp_path: Path, monkeypatch) -> None:
     assert graph_file.name == "graph.sqlite"
 
 
-def test_main_preserves_orchestrator_priority_order_over_lane(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_main_preserves_orchestrator_priority_order_over_lane(tmp_path: Path, monkeypatch) -> None:
     # Regression test for #104. `mythings.labels.sort_key` ranks prio above
     # lane, so the orchestrator hands back a product P0 ahead of a kernel P3.
     # A second sort keyed on lane in the dispatcher made lane primary again and
@@ -2151,9 +2206,30 @@ def test_pull_queue_fast_worker_pulls_multiple_candidates(tmp_path: Path, monkey
     monkeypatch.setattr(fd, "_last_attempt", lambda *a, **k: None)
 
     candidates = [
-        fd.Candidate(id="repoA#1", repo="repoA", tool="", title="t1", kind="issue", created_at="2026-09-13T20:00:00Z"),
-        fd.Candidate(id="repoB#2", repo="repoB", tool="", title="t2", kind="issue", created_at="2026-09-13T20:00:01Z"),
-        fd.Candidate(id="repoC#3", repo="repoC", tool="", title="t3", kind="issue", created_at="2026-09-13T20:00:02Z"),
+        fd.Candidate(
+            id="repoA#1",
+            repo="repoA",
+            tool="",
+            title="t1",
+            kind="issue",
+            created_at="2026-09-13T20:00:00Z",
+        ),
+        fd.Candidate(
+            id="repoB#2",
+            repo="repoB",
+            tool="",
+            title="t2",
+            kind="issue",
+            created_at="2026-09-13T20:00:01Z",
+        ),
+        fd.Candidate(
+            id="repoC#3",
+            repo="repoC",
+            tool="",
+            title="t3",
+            kind="issue",
+            created_at="2026-09-13T20:00:02Z",
+        ),
     ]
 
     class FakeRecommendation:
@@ -2198,8 +2274,22 @@ def test_pull_queue_respects_repo_leases(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(fd, "_last_attempt", lambda *a, **k: None)
 
     candidates = [
-        fd.Candidate(id="repoA#1", repo="repoA", tool="", title="t1", kind="issue", created_at="2026-09-13T20:00:00Z"),
-        fd.Candidate(id="repoA#2", repo="repoA", tool="", title="t2", kind="issue", created_at="2026-09-13T20:00:01Z"),
+        fd.Candidate(
+            id="repoA#1",
+            repo="repoA",
+            tool="",
+            title="t1",
+            kind="issue",
+            created_at="2026-09-13T20:00:00Z",
+        ),
+        fd.Candidate(
+            id="repoA#2",
+            repo="repoA",
+            tool="",
+            title="t2",
+            kind="issue",
+            created_at="2026-09-13T20:00:01Z",
+        ),
     ]
 
     class FakeRecommendation:
@@ -2260,8 +2350,13 @@ def test_ensure_repo_graph_rebuilds_when_the_extractor_version_moved(tmp_path: P
 def test_route_candidate_params() -> None:
     # Mechanical small task: size:S + kind:chore -> budget 1.0, turns 20
     cand_small = fd.Candidate(
-        id="repoA#1", repo="repoA", tool="", title="t1", kind="issue", created_at="2026-09-13T20:00:00Z",
-        labels=("size:S", "kind:chore")
+        id="repoA#1",
+        repo="repoA",
+        tool="",
+        title="t1",
+        kind="issue",
+        created_at="2026-09-13T20:00:00Z",
+        labels=("size:S", "kind:chore"),
     )
     provider, budget, turns = fd.route_candidate_params(cand_small)
     assert provider == "claude"
@@ -2270,8 +2365,13 @@ def test_route_candidate_params() -> None:
 
     # Complex / non-small task: size:M + kind:feat -> default budget 3.0, turns 40
     cand_large = fd.Candidate(
-        id="repoA#2", repo="repoA", tool="", title="t2", kind="issue", created_at="2026-09-13T20:00:00Z",
-        labels=("size:M", "kind:feat")
+        id="repoA#2",
+        repo="repoA",
+        tool="",
+        title="t2",
+        kind="issue",
+        created_at="2026-09-13T20:00:00Z",
+        labels=("size:M", "kind:feat"),
     )
     provider, budget, turns = fd.route_candidate_params(cand_large)
     assert budget == 3.0

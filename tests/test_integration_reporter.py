@@ -28,20 +28,22 @@ def make_repo_root(tmp_path: Path) -> tuple[Path, Path]:
     shared.append(
         LedgerEntry(
             tool="my-scraper",
-            kind="scrape",
+            kind="search",
             outcome="success",
             detail="fetched 3 pages",
             ts="2026-07-10T10:00:00Z",
+            data={"type": "scrape"},
         )
     )
     dev = Ledger(root / "dev-ledger" / "2026-07-10.jsonl")
     dev.append(
         LedgerEntry(
             tool="claude-code",
-            kind="decision",
-            outcome="recorded",
+            kind="plan",
+            outcome="success",
             detail="prefer the bare-origin builder over a git lambda",
             ts="2026-07-10T11:00:00Z",
+            data={"type": "decision"},
         )
     )
     return ledger_path, root
@@ -50,9 +52,7 @@ def make_repo_root(tmp_path: Path) -> tuple[Path, Path]:
 def run_reporter(*argv: str) -> subprocess.CompletedProcess[str]:
     if not MYREPORTER.exists():
         pytest.skip("myreporter is not installed in this environment")
-    return subprocess.run(
-        [str(MYREPORTER), *argv], capture_output=True, text=True, timeout=60
-    )
+    return subprocess.run([str(MYREPORTER), *argv], capture_output=True, text=True, timeout=60)
 
 
 def test_digest_reflects_a_real_sibling_ledger(tmp_path: Path) -> None:
