@@ -261,7 +261,9 @@ def render_human_digest(digest: GoalDigest) -> str:
         lines.append(f"- **Structural Clones:** {ga.get('total_clones', 0)}")
         lines.append(f"- **Topological Test Gaps:** {ga.get('total_test_gaps', 0)}")
         lines.append(f"- **Circular Imports:** {ga.get('total_circular_imports', 0)}")
-        lines.append(f"- **Unreferenced Internal Symbols:** {ga.get('total_unreferenced_symbols', 0)}")
+        lines.append(
+            f"- **Unreferenced Internal Symbols:** {ga.get('total_unreferenced_symbols', 0)}"
+        )
 
     lines.append("")
     lines.append("---")

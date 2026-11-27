@@ -35,30 +35,36 @@ def test_compile_ledger_stats(tmp_path: Path):
     old_ts = (now - timedelta(hours=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     lines = [
-        json.dumps({
-            "tool": "fleet_dispatch",
-            "kind": "dispatch",
-            "outcome": "started",
-            "detail": "recent run",
-            "ts": recent_ts,
-            "data": {"cost_usd": 0.25, "account": "acct-1"},
-        }),
-        json.dumps({
-            "tool": "fleet_dispatch",
-            "kind": "dispatch",
-            "outcome": "needs_human",
-            "detail": "blocked capability",
-            "ts": recent_ts,
-            "data": {"cost_usd": 0.10, "account": "acct-1", "candidate": "my-tool#1"},
-        }),
-        json.dumps({
-            "tool": "fleet_dispatch",
-            "kind": "dispatch",
-            "outcome": "started",
-            "detail": "old run",
-            "ts": old_ts,
-            "data": {"cost_usd": 0.50, "account": "acct-2"},
-        }),
+        json.dumps(
+            {
+                "tool": "fleet_dispatch",
+                "kind": "dispatch",
+                "outcome": "started",
+                "detail": "recent run",
+                "ts": recent_ts,
+                "data": {"cost_usd": 0.25, "account": "acct-1"},
+            }
+        ),
+        json.dumps(
+            {
+                "tool": "fleet_dispatch",
+                "kind": "dispatch",
+                "outcome": "needs_human",
+                "detail": "blocked capability",
+                "ts": recent_ts,
+                "data": {"cost_usd": 0.10, "account": "acct-1", "candidate": "my-tool#1"},
+            }
+        ),
+        json.dumps(
+            {
+                "tool": "fleet_dispatch",
+                "kind": "dispatch",
+                "outcome": "started",
+                "detail": "old run",
+                "ts": old_ts,
+                "data": {"cost_usd": 0.50, "account": "acct-2"},
+            }
+        ),
     ]
     ledger_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -100,7 +106,15 @@ def test_render_human_digest():
             spend_by_account={"acct-1": 0.45},
             needs_human_items=[{"candidate": "my-tool#1", "reason": "blocked capability"}],
         ),
-        open_prs=[{"repo": "my-tool", "number": 5, "title": "feat: test", "url": "http://pr", "is_draft": False}],
+        open_prs=[
+            {
+                "repo": "my-tool",
+                "number": 5,
+                "title": "feat: test",
+                "url": "http://pr",
+                "is_draft": False,
+            }
+        ],
         graph_audit_summary={"repos_scanned": 1, "repos_with_findings": 0, "total_clones": 0},
     )
 

@@ -70,10 +70,19 @@ def _run_main(monkeypatch, argv):
 
 def test_main_builds_flashcards_quiz_and_due_stages(tmp_path: Path, monkeypatch) -> None:
     tf = _topics_file(tmp_path, ("em-algorithm", "EM Algorithm"))
-    rc, cap = _run_main(monkeypatch, [
-        "--corpus", "notes.pdf", "--workdir", str(tmp_path),
-        "--topics-file", str(tf), "--topics-per-cycle", "1",
-    ])
+    rc, cap = _run_main(
+        monkeypatch,
+        [
+            "--corpus",
+            "notes.pdf",
+            "--workdir",
+            str(tmp_path),
+            "--topics-file",
+            str(tf),
+            "--topics-per-cycle",
+            "1",
+        ],
+    )
     assert rc == 0
     names = [s.name for s in cap["stages"]]
     assert any(n.startswith("myflashcards build") for n in names)
@@ -87,10 +96,19 @@ def test_main_builds_flashcards_quiz_and_due_stages(tmp_path: Path, monkeypatch)
 
 
 def test_main_adds_decompose_stage_when_program_given(tmp_path: Path, monkeypatch) -> None:
-    _, cap = _run_main(monkeypatch, [
-        "--corpus", "notes.pdf", "--program", "program.pdf",
-        "--workdir", str(tmp_path), "--topics-per-cycle", "0",
-    ])
+    _, cap = _run_main(
+        monkeypatch,
+        [
+            "--corpus",
+            "notes.pdf",
+            "--program",
+            "program.pdf",
+            "--workdir",
+            str(tmp_path),
+            "--topics-per-cycle",
+            "0",
+        ],
+    )
     names = [s.name for s in cap["stages"]]
     assert names[0] == "mysyllabus decompose"
 
@@ -113,19 +131,33 @@ def test_main_selects_topics_decompose_just_wrote(tmp_path: Path, monkeypatch) -
         return 0
 
     monkeypatch.setattr(sc, "run_cycle", fake_run_cycle)
-    rc = sc.main([
-        "--corpus", "notes.pdf", "--program", "program.pdf",
-        "--workdir", str(tmp_path), "--topics-per-cycle", "1", "--execute",
-    ])
+    rc = sc.main(
+        [
+            "--corpus",
+            "notes.pdf",
+            "--program",
+            "program.pdf",
+            "--workdir",
+            str(tmp_path),
+            "--topics-per-cycle",
+            "1",
+            "--execute",
+        ]
+    )
     assert rc == 0
     assert topics_file.exists()  # decompose ran for real in this pass
     # main() would build the next stage list from this now-populated file —
     # exercise that directly with the args main() would have used.
     args = argparse.Namespace(
-        program=Path("program.pdf"), topics_file=topics_file,
-        ledger=tmp_path / ".mythings" / "mastery.jsonl", topics_per_cycle=1,
-        corpus=[Path("notes.pdf")], deck_dir=tmp_path / ".mythings" / "decks",
-        cards=8, questions=3, engine="claude",
+        program=Path("program.pdf"),
+        topics_file=topics_file,
+        ledger=tmp_path / ".mythings" / "mastery.jsonl",
+        topics_per_cycle=1,
+        corpus=[Path("notes.pdf")],
+        deck_dir=tmp_path / ".mythings" / "decks",
+        cards=8,
+        questions=3,
+        engine="claude",
     )
     stages = sc.build_study_stages(args)
     names = [s.name for s in stages]
@@ -139,7 +171,8 @@ def test_main_defaults_paths_under_workdir(tmp_path: Path, monkeypatch) -> None:
     assert str(tmp_path / ".mythings" / "mastery.jsonl") in due.argv
 
 
-def test_main_no_topics_is_noted(tmp_path: Path, monkeypatch,
-                                 capsys: pytest.CaptureFixture[str]) -> None:
+def test_main_no_topics_is_noted(
+    tmp_path: Path, monkeypatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     _run_main(monkeypatch, ["--corpus", "notes.pdf", "--workdir", str(tmp_path)])
     assert "no topics to study yet" in capsys.readouterr().out

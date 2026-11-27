@@ -91,9 +91,7 @@ def _env(venv_bin: Path | None) -> dict[str, str]:
 
 
 def _run(argv: list[str], cwd: Path, *, venv_bin: Path | None = None) -> tuple[int, str]:
-    proc = subprocess.run(
-        argv, cwd=cwd, capture_output=True, text=True, env=_env(venv_bin)
-    )
+    proc = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, env=_env(venv_bin))
     return proc.returncode, (proc.stdout + proc.stderr).strip()
 
 
@@ -124,7 +122,7 @@ def _revendor_harness(repo: Path) -> None:
 #     paths-ignore: ["**.md", "docs/**", "dev-ledger/**"]
 # Anything else is left alone and reported, rather than guessed at -- a regex
 # that half-understands a CI trigger is how a repo ends up with no CI at all.
-_PATHS_IGNORE_LINE = re.compile(r'^(\s*paths-ignore:\s*\[)(.*)(\]\s*)$')
+_PATHS_IGNORE_LINE = re.compile(r"^(\s*paths-ignore:\s*\[)(.*)(\]\s*)$")
 
 
 def _drop_md_from_paths_ignore(repo: Path) -> None:
@@ -192,7 +190,7 @@ TRANSFORMS = {
         name="ci-md",
         title="ci: let markdown-only changes run the test suite",
         body=(
-            "`paths-ignore: [\"**.md\", ...]` means a docs-only PR triggers no run, "
+            '`paths-ignore: ["**.md", ...]` means a docs-only PR triggers no run, '
             "so it gets no `test` check. Where `test` is a required check that PR can "
             "never merge, and `myfleet.accept` correctly refuses it (a skipped check "
             "is not a pass). That makes every fleet-wide documentation change — "
@@ -330,9 +328,7 @@ def apply_to(
     scratch = Path(tempfile.mkdtemp(prefix=f"sweep-{transform.name}-"))
     tree = scratch / name
     try:
-        code, out = runner(
-            ["git", "worktree", "add", "--detach", str(tree), "origin/main"], repo
-        )
+        code, out = runner(["git", "worktree", "add", "--detach", str(tree), "origin/main"], repo)
         if code != 0:
             return RepoOutcome(name, "failed", f"git worktree add: {out}")
 
@@ -381,13 +377,26 @@ def apply_to(
                 return RepoOutcome(name, "failed", f"{' '.join(argv[:2])}: {out}", changed=changed)
 
         code, out = runner(
-            ["gh", "pr", "create", "--title", transform.title, "--body", transform.body,
-             "--base", "main", "--head", branch],
+            [
+                "gh",
+                "pr",
+                "create",
+                "--title",
+                transform.title,
+                "--body",
+                transform.body,
+                "--base",
+                "main",
+                "--head",
+                branch,
+            ],
             tree,
         )
         if code != 0:
             return RepoOutcome(name, "failed", f"gh pr create: {out}", changed=changed)
-        return RepoOutcome(name, "opened", transform.title, changed=changed, url=out.splitlines()[-1])
+        return RepoOutcome(
+            name, "opened", transform.title, changed=changed, url=out.splitlines()[-1]
+        )
     finally:
         # The worktree is registered in the *real* repo's .git, so dropping the
         # temp dir alone would leave it listed forever as a prunable stale entry.

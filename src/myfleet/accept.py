@@ -340,7 +340,9 @@ def assess(repo: str, number: int) -> Assessment:
                 Check("no_new_dependency", None, "could not read a changed pyproject.toml")
             )
         elif added:
-            found.checks.append(Check("no_new_dependency", None, f"adds {', '.join(sorted(added))}"))
+            found.checks.append(
+                Check("no_new_dependency", None, f"adds {', '.join(sorted(added))}")
+            )
         else:
             found.checks.append(Check("no_new_dependency", True, "no dependency added"))
 
@@ -399,7 +401,10 @@ def merge_pr(repo: str, number: int, *, retries: int = 4) -> None:
         )
         if code == 0:
             return
-        if any(t in err for t in ("Base branch was modified", "not mergeable", "not up to date")) and attempt < retries - 1:
+        if (
+            any(t in err for t in ("Base branch was modified", "not mergeable", "not up to date"))
+            and attempt < retries - 1
+        ):
             time.sleep(10)
             continue
         raise RuntimeError(f"gh pr merge {repo}#{number} failed: {err.strip()}")
@@ -407,7 +412,18 @@ def merge_pr(repo: str, number: int, *, retries: int = 4) -> None:
 
 def list_open_prs_in_org(org: str = ORG) -> list[tuple[str, int, str, bool]]:
     code, out, _ = _gh(
-        ["search", "prs", "--owner", org, "--state", "open", "--limit", "200", "--json", "number,title,repository,isDraft"]
+        [
+            "search",
+            "prs",
+            "--owner",
+            org,
+            "--state",
+            "open",
+            "--limit",
+            "200",
+            "--json",
+            "number,title,repository,isDraft",
+        ]
     )
     if code != 0:
         return []
@@ -555,7 +571,10 @@ def settle(
                                     detail=assessment.reason,
                                 )
                         except Exception as exc:
-                            print(f"FAILED to merge after approval: {repo}#{number}: {exc}", file=sys.stderr)
+                            print(
+                                f"FAILED to merge after approval: {repo}#{number}: {exc}",
+                                file=sys.stderr,
+                            )
                             if ledger and hasattr(ledger, "record"):
                                 rows.record(
                                     ledger,
@@ -650,16 +669,12 @@ def report(assessments: list[Assessment], *, as_json: bool) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--repo", action="append", help="repo name within the org (repeatable)")
-    parser.add_argument(
-        "--pr", type=int, action="append", help="PR number (repeatable)"
-    )
+    parser.add_argument("--pr", type=int, action="append", help="PR number (repeatable)")
     parser.add_argument("--json", action="store_true", dest="as_json")
     parser.add_argument(
         "--settle", action="store_true", help="run settlement pass across org open PRs"
     )
-    parser.add_argument(
-        "--execute", action="store_true", help="actually merge accepted PRs"
-    )
+    parser.add_argument("--execute", action="store_true", help="actually merge accepted PRs")
     parser.add_argument(
         "--ask-human", action="store_true", help="route needs_human PRs to Telegram ask channel"
     )
@@ -679,6 +694,7 @@ def main(argv: list[str] | None = None) -> int:
         from mythings.ledger import Ledger
 
         from myfleet.fleet_dispatch import DISPATCH_LEDGER
+
         ledger = Ledger(DISPATCH_LEDGER)
         assessments = settle(
             execute=args.execute,

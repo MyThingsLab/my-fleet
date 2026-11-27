@@ -257,9 +257,7 @@ def get_preflight_provider(provider: str = "claude") -> PreflightProvider:
 def check_account(
     config_dir: str, workspace: Path, *, timeout: float = 120.0, provider: str = "claude"
 ) -> AccountPreflight:
-    return get_preflight_provider(provider).check_account(
-        config_dir, workspace, timeout=timeout
-    )
+    return get_preflight_provider(provider).check_account(config_dir, workspace, timeout=timeout)
 
 
 def select_accounts(
@@ -288,9 +286,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Check that each dispatch account can authenticate and run in the workspace."
     )
-    parser.add_argument(
-        "--accounts", required=True, help="comma-separated config dir paths"
-    )
+    parser.add_argument("--accounts", required=True, help="comma-separated config dir paths")
     parser.add_argument(
         "--provider",
         choices=list(PREFLIGHT_PROVIDERS),
@@ -322,7 +318,6 @@ def main(argv: list[str] | None = None) -> int:
 
     print(",".join(r.config_dir for r in usable))
     return 0 if usable else 1
-
 
 
 if __name__ == "__main__":
