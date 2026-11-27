@@ -9,7 +9,7 @@ the `study_cycle.py` driver. Worked example: the Unsupervised Learning exam.
 1. **The 5 PRs are merged** (or just run from the local editable installs — the
    shared `.venv` already has every tool). Sanity check:
    ```bash
-   source ~/Desktop/MyThingsLab/.venv/bin/activate
+   source ~/MyThingsLab/.venv/bin/activate
    mysyllabus --help && myprofessor --help && myflashcards --help && mygrader --help
    ```
 2. **Materials on disk**, as *text* PDFs (not scans — image-only PDFs ingest as
@@ -59,7 +59,7 @@ topics from the mastery ledger, and generates fresh flashcards + a quiz for each
 then prints your standing:
 
 ```bash
-python3 ~/Desktop/MyThingsLab/study_cycle.py \
+python3 ~/MyThingsLab/study_cycle.py \
   --workdir ~/study/unsupervised-learning \
   --corpus ~/study/unsupervised-learning/notes.pdf \
   --corpus ~/study/unsupervised-learning/slides.pdf \

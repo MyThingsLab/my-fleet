@@ -96,7 +96,7 @@ def test_cli_audit(tmp_path: Path, capsys):
 
 def test_live_ledger_audit():
     # Test against live repository workspace ledger if present
-    live_path = Path("/home/lollinux/Desktop/MyThingsLab/.my-fleet/ledger.jsonl")
+    live_path = Path.home() / "MyThingsLab" / ".my-fleet" / "ledger.jsonl"
     if live_path.exists():
         res = audit_ledger(live_path)
         assert isinstance(res.total_entries, int)
